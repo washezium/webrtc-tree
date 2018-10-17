@@ -175,6 +175,15 @@ int GetMaxDefaultBitrateBps(size_t width, size_t height) {
   }
 }
 
+class MockVideoSource : public rtc::VideoSourceInterface<webrtc::VideoFrame> {
+ public:
+  MOCK_METHOD2(AddOrUpdateSink,
+               void(rtc::VideoSinkInterface<webrtc::VideoFrame>* sink,
+                    const rtc::VideoSinkWants& wants));
+  MOCK_METHOD1(RemoveSink,
+               void(rtc::VideoSinkInterface<webrtc::VideoFrame>* sink));
+};
+
 }  // namespace
 
 #define EXPECT_FRAME_WAIT(c, w, h, t)                        \
@@ -300,9 +309,9 @@ TEST_F(WebRtcVideoEngineTest, SupportsVideoRotationHeaderExtension) {
 }
 
 TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionBeforeCapturer) {
-  // Allocate the capturer first to prevent early destruction before channel's
+  // Allocate the source first to prevent early destruction before channel's
   // dtor is called.
-  FakeVideoCapturerWithTaskQueue capturer;
+  testing::NiceMock<MockVideoSource> video_source;
 
   encoder_factory_->AddSupportedVideoCodecType("VP8");
 
@@ -318,22 +327,30 @@ TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionBeforeCapturer) {
       RtpExtension(RtpExtension::kVideoRotationUri, id));
   EXPECT_TRUE(channel->SetSendParameters(parameters));
 
+  EXPECT_CALL(
+      video_source,
+      AddOrUpdateSink(testing::_,
+                      Field(&rtc::VideoSinkWants::rotation_applied, false)));
   // Set capturer.
-  EXPECT_TRUE(channel->SetVideoSend(kSsrc, nullptr, &capturer));
+  EXPECT_TRUE(channel->SetVideoSend(kSsrc, nullptr, &video_source));
 
   // Verify capturer has turned off applying rotation.
-  EXPECT_FALSE(capturer.apply_rotation());
+  testing::Mock::VerifyAndClear(&video_source);
 
   // Verify removing header extension turns on applying rotation.
   parameters.extensions.clear();
+  EXPECT_CALL(
+      video_source,
+      AddOrUpdateSink(testing::_,
+                      Field(&rtc::VideoSinkWants::rotation_applied, true)));
+
   EXPECT_TRUE(channel->SetSendParameters(parameters));
-  EXPECT_TRUE(capturer.apply_rotation());
 }
 
 TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionBeforeAddSendStream) {
-  // Allocate the capturer first to prevent early destruction before channel's
+  // Allocate the source first to prevent early destruction before channel's
   // dtor is called.
-  FakeVideoCapturerWithTaskQueue capturer;
+  testing::NiceMock<MockVideoSource> video_source;
 
   encoder_factory_->AddSupportedVideoCodecType("VP8");
 
@@ -348,15 +365,16 @@ TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionBeforeAddSendStream) {
   EXPECT_TRUE(channel->SetSendParameters(parameters));
   EXPECT_TRUE(channel->AddSendStream(StreamParams::CreateLegacy(kSsrc)));
 
-  // Set capturer.
-  EXPECT_TRUE(channel->SetVideoSend(kSsrc, nullptr, &capturer));
-
-  // Verify capturer has turned off applying rotation.
-  EXPECT_FALSE(capturer.apply_rotation());
+  // Set source.
+  EXPECT_CALL(
+      video_source,
+      AddOrUpdateSink(testing::_,
+                      Field(&rtc::VideoSinkWants::rotation_applied, false)));
+  EXPECT_TRUE(channel->SetVideoSend(kSsrc, nullptr, &video_source));
 }
 
 TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionAfterCapturer) {
-  FakeVideoCapturerWithTaskQueue capturer;
+  testing::NiceMock<MockVideoSource> video_source;
 
   encoder_factory_->AddSupportedVideoCodecType("VP8");
   encoder_factory_->AddSupportedVideoCodecType("VP9");
@@ -366,10 +384,14 @@ TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionAfterCapturer) {
   EXPECT_TRUE(channel->AddSendStream(StreamParams::CreateLegacy(kSsrc)));
 
   // Set capturer.
-  EXPECT_TRUE(channel->SetVideoSend(kSsrc, nullptr, &capturer));
+  EXPECT_CALL(
+      video_source,
+      AddOrUpdateSink(testing::_,
+                      Field(&rtc::VideoSinkWants::rotation_applied, true)));
+  EXPECT_TRUE(channel->SetVideoSend(kSsrc, nullptr, &video_source));
 
   // Verify capturer has turned on applying rotation.
-  EXPECT_TRUE(capturer.apply_rotation());
+  testing::Mock::VerifyAndClear(&video_source);
 
   // Add CVO extension.
   const int id = 1;
@@ -380,15 +402,22 @@ TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionAfterCapturer) {
       RtpExtension(RtpExtension::kVideoRotationUri, id));
   // Also remove the first codec to trigger a codec change as well.
   parameters.codecs.erase(parameters.codecs.begin());
+  EXPECT_CALL(
+      video_source,
+      AddOrUpdateSink(testing::_,
+                      Field(&rtc::VideoSinkWants::rotation_applied, false)));
   EXPECT_TRUE(channel->SetSendParameters(parameters));
 
   // Verify capturer has turned off applying rotation.
-  EXPECT_FALSE(capturer.apply_rotation());
+  testing::Mock::VerifyAndClear(&video_source);
 
   // Verify removing header extension turns on applying rotation.
   parameters.extensions.clear();
+  EXPECT_CALL(
+      video_source,
+      AddOrUpdateSink(testing::_,
+                      Field(&rtc::VideoSinkWants::rotation_applied, true)));
   EXPECT_TRUE(channel->SetSendParameters(parameters));
-  EXPECT_TRUE(capturer.apply_rotation());
 }
 
 TEST_F(WebRtcVideoEngineTest, SetSendFailsBeforeSettingCodecs) {
@@ -1405,6 +1434,59 @@ TEST_F(WebRtcVideoChannelBaseTest, SetSendSetsTransportBufferSizes) {
   EXPECT_TRUE(SetSend(true));
   EXPECT_EQ(64 * 1024, network_interface_.sendbuf_size());
   EXPECT_EQ(64 * 1024, network_interface_.recvbuf_size());
+}
+
+// Test that we properly set the send and recv buffer sizes when overriding
+// via field trials.
+TEST_F(WebRtcVideoChannelBaseTest, OverridesRecvBufferSize) {
+  // Set field trial to override the default recv buffer size, and then re-run
+  // setup where the interface is created and configured.
+  const int kCustomRecvBufferSize = 123456;
+  webrtc::test::ScopedFieldTrials field_trial(
+      "WebRTC-IncreasedReceivebuffers/123456/");
+  SetUp();
+
+  EXPECT_TRUE(SetOneCodec(DefaultCodec()));
+  EXPECT_TRUE(SetSend(true));
+  EXPECT_EQ(64 * 1024, network_interface_.sendbuf_size());
+  EXPECT_EQ(kCustomRecvBufferSize, network_interface_.recvbuf_size());
+}
+
+// Test that we properly set the send and recv buffer sizes when overriding
+// via field trials with suffix.
+TEST_F(WebRtcVideoChannelBaseTest, OverridesRecvBufferSizeWithSuffix) {
+  // Set field trial to override the default recv buffer size, and then re-run
+  // setup where the interface is created and configured.
+  const int kCustomRecvBufferSize = 123456;
+  webrtc::test::ScopedFieldTrials field_trial(
+      "WebRTC-IncreasedReceivebuffers/123456_Dogfood/");
+  SetUp();
+
+  EXPECT_TRUE(SetOneCodec(DefaultCodec()));
+  EXPECT_TRUE(SetSend(true));
+  EXPECT_EQ(64 * 1024, network_interface_.sendbuf_size());
+  EXPECT_EQ(kCustomRecvBufferSize, network_interface_.recvbuf_size());
+}
+
+// Test that we properly set the send and recv buffer sizes when overriding
+// via field trials that don't make any sense.
+TEST_F(WebRtcVideoChannelBaseTest, InvalidRecvBufferSize) {
+  // Set bogus field trial values to override the default recv buffer size, and
+  // then re-run setup where the interface is created and configured. The
+  // default value should still be used.
+
+  for (std::string group : {" ", "NotANumber", "-1", "0"}) {
+    std::string field_trial_string = "WebRTC-IncreasedReceivebuffers/";
+    field_trial_string += group;
+    field_trial_string += "/";
+    webrtc::test::ScopedFieldTrials field_trial(field_trial_string);
+    SetUp();
+
+    EXPECT_TRUE(SetOneCodec(DefaultCodec()));
+    EXPECT_TRUE(SetSend(true));
+    EXPECT_EQ(64 * 1024, network_interface_.sendbuf_size());
+    EXPECT_EQ(64 * 1024, network_interface_.recvbuf_size());
+  }
 }
 
 // Test that stats work properly for a 1-1 call.
@@ -6035,6 +6117,30 @@ TEST_F(WebRtcVideoChannelTest, DetectRtpSendParameterHeaderExtensionsChange) {
   EXPECT_EQ(webrtc::RTCErrorType::INVALID_MODIFICATION, result.type());
 }
 
+TEST_F(WebRtcVideoChannelTest, GetRtpSendParametersDegradationPreference) {
+  AddSendStream();
+
+  FakeVideoCapturerWithTaskQueue capturer;
+  EXPECT_TRUE(channel_->SetVideoSend(last_ssrc_, nullptr, &capturer));
+
+  webrtc::RtpParameters rtp_parameters =
+      channel_->GetRtpSendParameters(last_ssrc_);
+  EXPECT_EQ(rtp_parameters.degradation_preference,
+            webrtc::DegradationPreference::BALANCED);
+  rtp_parameters.degradation_preference =
+      webrtc::DegradationPreference::MAINTAIN_FRAMERATE;
+
+  EXPECT_TRUE(channel_->SetRtpSendParameters(last_ssrc_, rtp_parameters).ok());
+
+  webrtc::RtpParameters updated_rtp_parameters =
+      channel_->GetRtpSendParameters(last_ssrc_);
+  EXPECT_EQ(updated_rtp_parameters.degradation_preference,
+            webrtc::DegradationPreference::MAINTAIN_FRAMERATE);
+
+  // Remove the source since it will be destroyed before the channel
+  EXPECT_TRUE(channel_->SetVideoSend(last_ssrc_, nullptr, nullptr));
+}
+
 // Test that if we set/get parameters multiple times, we get the same results.
 TEST_F(WebRtcVideoChannelTest, SetAndGetRtpSendParameters) {
   AddSendStream();
@@ -6415,32 +6521,28 @@ TEST_F(WebRtcVideoChannelSimulcastTest, SetSendCodecsWithOddSizeInSimulcast) {
                           true);
 }
 
-// TODO(ilnik): Remove this test once Simulcast Screenshare is launched.
 TEST_F(WebRtcVideoChannelSimulcastTest, SetSendCodecsForScreenshare) {
-  webrtc::test::ScopedFieldTrials override_field_trials_(
-      "WebRTC-SimulcastScreenshare/Disabled/");
-
   VerifySimulcastSettings(cricket::VideoCodec("VP8"), 1280, 720, 3, 1, true,
                           false);
 }
 
-// TODO(ilnik): Remove this test once Simulcast Screenshare is launched.
 TEST_F(WebRtcVideoChannelSimulcastTest,
        SetSendCodecsForConferenceModeScreenshare) {
-  webrtc::test::ScopedFieldTrials override_field_trials_(
-      "WebRTC-SimulcastScreenshare/Disabled/");
-
   VerifySimulcastSettings(cricket::VideoCodec("VP8"), 1280, 720, 3, 1, true,
                           true);
 }
 
 TEST_F(WebRtcVideoChannelSimulcastTest, SetSendCodecsForSimulcastScreenshare) {
+  webrtc::test::ScopedFieldTrials override_field_trials_(
+      "WebRTC-SimulcastScreenshare/Enabled/");
   VerifySimulcastSettings(cricket::VideoCodec("VP8"), 1280, 720, 3, 2, true,
                           true);
 }
 
 TEST_F(WebRtcVideoChannelSimulcastTest,
        NoSimulcastScreenshareWithoutConference) {
+  webrtc::test::ScopedFieldTrials override_field_trials_(
+      "WebRTC-SimulcastScreenshare/Enabled/");
   VerifySimulcastSettings(cricket::VideoCodec("VP8"), 1280, 720, 3, 1, true,
                           false);
 }
