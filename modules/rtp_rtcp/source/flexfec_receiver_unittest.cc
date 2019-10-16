@@ -8,10 +8,11 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "modules/rtp_rtcp/include/flexfec_receiver.h"
+
 #include <algorithm>
 #include <memory>
 
-#include "modules/rtp_rtcp/include/flexfec_receiver.h"
 #include "modules/rtp_rtcp/mocks/mock_recovered_packet_receiver.h"
 #include "modules/rtp_rtcp/source/fec_test_helper.h"
 #include "modules/rtp_rtcp/source/forward_error_correction.h"
@@ -79,7 +80,7 @@ class FlexfecReceiverTest : public ::testing::Test {
   std::unique_ptr<ForwardErrorCorrection> erasure_code_;
 
   FlexfecPacketGenerator packet_generator_;
-  testing::StrictMock<MockRecoveredPacketReceiver> recovered_packet_receiver_;
+  ::testing::StrictMock<MockRecoveredPacketReceiver> recovered_packet_receiver_;
 };
 
 void FlexfecReceiverTest::PacketizeFrame(size_t num_media_packets,

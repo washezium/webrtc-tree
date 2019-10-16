@@ -10,6 +10,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
 #include <memory>
 #include <string>
 #include <utility>
@@ -28,7 +29,6 @@
 #include "call/simulated_packet_receiver.h"
 #include "call/video_receive_stream.h"
 #include "call/video_send_stream.h"
-#include "common_types.h"  // NOLINT(build/include)
 #include "modules/rtp_rtcp/source/rtcp_packet/dlrr.h"
 #include "modules/rtp_rtcp/source/rtcp_packet/target_bitrate.h"
 #include "rtc_base/critical_section.h"

@@ -11,6 +11,7 @@
 #include "modules/audio_coding/include/audio_coding_module.h"
 
 #include <assert.h>
+
 #include <algorithm>
 #include <cstdint>
 
@@ -282,28 +283,6 @@ int UpMix(const AudioFrame& frame, size_t length_out_buff, int16_t* out_buff) {
   return 0;
 }
 
-void ConvertEncodedInfoToFragmentationHeader(
-    const AudioEncoder::EncodedInfo& info,
-    RTPFragmentationHeader* frag) {
-  if (info.redundant.empty()) {
-    frag->fragmentationVectorSize = 0;
-    return;
-  }
-
-  frag->VerifyAndAllocateFragmentationHeader(
-      static_cast<uint16_t>(info.redundant.size()));
-  frag->fragmentationVectorSize = static_cast<uint16_t>(info.redundant.size());
-  size_t offset = 0;
-  for (size_t i = 0; i < info.redundant.size(); ++i) {
-    frag->fragmentationOffset[i] = offset;
-    offset += info.redundant[i].encoded_bytes;
-    frag->fragmentationLength[i] = info.redundant[i].encoded_bytes;
-    frag->fragmentationTimeDiff[i] = rtc::dchecked_cast<uint16_t>(
-        info.encoded_timestamp - info.redundant[i].encoded_timestamp);
-    frag->fragmentationPlType[i] = info.redundant[i].payload_type;
-  }
-}
-
 void AudioCodingModuleImpl::ChangeLogger::MaybeLog(int value) {
   if (value != last_value_ || first_time_) {
     first_time_ = false;
@@ -350,13 +329,13 @@ int32_t AudioCodingModuleImpl::Encode(const InputData& input_data) {
 
   // Scale the timestamp to the codec's RTP timestamp rate.
   uint32_t rtp_timestamp =
-      first_frame_ ? input_data.input_timestamp
-                   : last_rtp_timestamp_ +
-                         rtc::CheckedDivExact(
-                             input_data.input_timestamp - last_timestamp_,
-                             static_cast<uint32_t>(rtc::CheckedDivExact(
-                                 encoder_stack_->SampleRateHz(),
-                                 encoder_stack_->RtpTimestampRateHz())));
+      first_frame_
+          ? input_data.input_timestamp
+          : last_rtp_timestamp_ +
+                rtc::dchecked_cast<uint32_t>(rtc::CheckedDivExact(
+                    int64_t{input_data.input_timestamp - last_timestamp_} *
+                        encoder_stack_->RtpTimestampRateHz(),
+                    int64_t{encoder_stack_->SampleRateHz()}));
   last_timestamp_ = input_data.input_timestamp;
   last_rtp_timestamp_ = rtp_timestamp;
   first_frame_ = false;
@@ -391,15 +370,14 @@ int32_t AudioCodingModuleImpl::Encode(const InputData& input_data) {
     }
   }
 
-  RTPFragmentationHeader my_fragmentation;
-  ConvertEncodedInfoToFragmentationHeader(encoded_info, &my_fragmentation);
-  FrameType frame_type;
+  AudioFrameType frame_type;
   if (encode_buffer_.size() == 0 && encoded_info.send_even_if_empty) {
-    frame_type = kEmptyFrame;
+    frame_type = AudioFrameType::kEmptyFrame;
     encoded_info.payload_type = previous_pltype;
   } else {
     RTC_DCHECK_GT(encode_buffer_.size(), 0);
-    frame_type = encoded_info.speech ? kAudioFrameSpeech : kAudioFrameCN;
+    frame_type = encoded_info.speech ? AudioFrameType::kAudioFrameSpeech
+                                     : AudioFrameType::kAudioFrameCN;
   }
 
   {
@@ -407,9 +385,7 @@ int32_t AudioCodingModuleImpl::Encode(const InputData& input_data) {
     if (packetization_callback_) {
       packetization_callback_->SendData(
           frame_type, encoded_info.payload_type, encoded_info.encoded_timestamp,
-          encode_buffer_.data(), encode_buffer_.size(),
-          my_fragmentation.fragmentationVectorSize > 0 ? &my_fragmentation
-                                                       : nullptr);
+          encode_buffer_.data(), encode_buffer_.size());
     }
 
     if (vad_callback_) {
@@ -679,7 +655,7 @@ void AudioCodingModuleImpl::SetReceiveCodecs(
 }
 
 absl::optional<std::pair<int, SdpAudioFormat>>
-    AudioCodingModuleImpl::ReceiveCodec() const {
+AudioCodingModuleImpl::ReceiveCodec() const {
   rtc::CritScope lock(&acm_crit_sect_);
   return receiver_.LastDecoder();
 }

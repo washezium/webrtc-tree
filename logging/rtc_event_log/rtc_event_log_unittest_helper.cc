@@ -11,6 +11,7 @@
 #include "logging/rtc_event_log/rtc_event_log_unittest_helper.h"
 
 #include <string.h>  // memcmp
+
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -348,6 +349,11 @@ rtcp::LossNotification EventGenerator::NewLossNotification() {
   EXPECT_TRUE(
       loss_notification.Set(last_decoded, last_received, decodability_flag));
   return loss_notification;
+}
+
+std::unique_ptr<RtcEventRouteChange> EventGenerator::NewRouteChange() {
+  return absl::make_unique<RtcEventRouteChange>(prng_.Rand<bool>(),
+                                                prng_.Rand(0, 128));
 }
 
 std::unique_ptr<RtcEventRtcpPacketIncoming>
@@ -917,6 +923,14 @@ void VerifyLoggedRtpHeader(const RtpPacket& original_header,
     EXPECT_EQ(ConvertCVOByteToVideoRotation(rotation),
               logged_header.extension.videoRotation);
   }
+}
+
+void EventVerifier::VerifyLoggedRouteChangeEvent(
+    const RtcEventRouteChange& original_event,
+    const LoggedRouteChangeEvent& logged_event) const {
+  EXPECT_EQ(original_event.timestamp_ms(), logged_event.log_time_ms());
+  EXPECT_EQ(original_event.connected(), logged_event.connected);
+  EXPECT_EQ(original_event.overhead(), logged_event.overhead);
 }
 
 void EventVerifier::VerifyLoggedRtpPacketIncoming(

@@ -19,6 +19,7 @@
 
 #include "api/candidate.h"
 #include "api/crypto/crypto_options.h"
+#include "api/media_transport_config.h"
 #include "api/media_transport_interface.h"
 #include "api/peer_connection_interface.h"
 #include "logging/rtc_event_log/rtc_event_log.h"
@@ -89,6 +90,13 @@ class JsepTransportController : public sigslot::has_slots<> {
     // Whether media transport is used for data channels.
     bool use_media_transport_for_data_channels = false;
 
+    // Whether an RtpMediaTransport should be created as default, when no
+    // MediaTransportFactory is provided.
+    bool use_rtp_media_transport = false;
+
+    // Use encrypted datagram transport to send packets.
+    bool use_datagram_transport = false;
+
     // Optional media transport factory (experimental). If provided it will be
     // used to create media_transport (as long as either
     // |use_media_transport_for_media| or
@@ -129,7 +137,16 @@ class JsepTransportController : public sigslot::has_slots<> {
   rtc::scoped_refptr<webrtc::DtlsTransport> LookupDtlsTransportByMid(
       const std::string& mid);
 
-  MediaTransportInterface* GetMediaTransport(const std::string& mid) const;
+  MediaTransportConfig GetMediaTransportConfig(const std::string& mid) const;
+
+  MediaTransportInterface* GetMediaTransportForDataChannel(
+      const std::string& mid) const;
+
+  // TODO(sukhanov): Deprecate, return only config.
+  MediaTransportInterface* GetMediaTransport(const std::string& mid) const {
+    return GetMediaTransportConfig(mid).media_transport;
+  }
+
   MediaTransportState GetMediaTransportState(const std::string& mid) const;
 
   /*********************
@@ -186,7 +203,8 @@ class JsepTransportController : public sigslot::has_slots<> {
   // you did not call 'GetMediaTransport' or 'MaybeCreateJsepTransport'. Once
   // Jsep transport is created, you can't change this setting.
   void SetMediaTransportSettings(bool use_media_transport_for_media,
-                                 bool use_media_transport_for_data_channels);
+                                 bool use_media_transport_for_data_channels,
+                                 bool use_datagram_transport);
 
   // If media transport is present enabled and supported,
   // when this method is called, it creates a media transport and generates its
@@ -194,6 +212,13 @@ class JsepTransportController : public sigslot::has_slots<> {
   // subsequently be used.
   absl::optional<cricket::SessionDescription::MediaTransportSetting>
   GenerateOrGetLastMediaTransportOffer();
+
+  // Gets the transport parameters for the transport identified by |mid|.
+  // If |mid| is bundled, returns the parameters for the bundled transport.
+  // If the transport for |mid| has not been created yet, it may be allocated in
+  // order to generate transport parameters.
+  absl::optional<cricket::OpaqueTransportParameters> GetTransportParameters(
+      const std::string& mid);
 
   // All of these signals are fired on the signaling thread.
 
@@ -216,6 +241,9 @@ class JsepTransportController : public sigslot::has_slots<> {
   // (mid, candidates)
   sigslot::signal2<const std::string&, const std::vector<cricket::Candidate>&>
       SignalIceCandidatesGathered;
+
+  sigslot::signal1<const cricket::IceCandidateErrorEvent&>
+      SignalIceCandidateError;
 
   sigslot::signal1<const std::vector<cricket::Candidate>&>
       SignalIceCandidatesRemoved;
@@ -243,8 +271,8 @@ class JsepTransportController : public sigslot::has_slots<> {
   void RemoveTransportForMid(const std::string& mid);
 
   cricket::JsepTransportDescription CreateJsepTransportDescription(
-      cricket::ContentInfo content_info,
-      cricket::TransportInfo transport_info,
+      const cricket::ContentInfo& content_info,
+      const cricket::TransportInfo& transport_info,
       const std::vector<int>& encrypted_extension_ids,
       int rtp_abs_sendtime_extn_id);
 
@@ -304,6 +332,17 @@ class JsepTransportController : public sigslot::has_slots<> {
       const cricket::ContentInfo& content_info,
       const cricket::SessionDescription& description,
       bool local);
+
+  // Creates datagram transport if config wants to use it, and a=x-mt line is
+  // present for the current media transport. Returned
+  // DatagramTransportInterface is not connected, and must be connected to ICE.
+  // You must call |GenerateOrGetLastMediaTransportOffer| on the caller before
+  // calling MaybeCreateDatagramTransport.
+  std::unique_ptr<webrtc::DatagramTransportInterface>
+  MaybeCreateDatagramTransport(const cricket::ContentInfo& content_info,
+                               const cricket::SessionDescription& description,
+                               bool local);
+
   void MaybeDestroyJsepTransport(const std::string& mid);
   void DestroyAllJsepTransports_n();
 
@@ -316,7 +355,9 @@ class JsepTransportController : public sigslot::has_slots<> {
       bool local);
 
   std::unique_ptr<cricket::DtlsTransportInternal> CreateDtlsTransport(
-      std::unique_ptr<cricket::IceTransportInternal> ice);
+      const cricket::ContentInfo& content_info,
+      cricket::IceTransportInternal* ice,
+      DatagramTransportInterface* datagram_transport);
   std::unique_ptr<cricket::IceTransportInternal> CreateIceTransport(
       const std::string transport_name,
       bool rtcp);
@@ -345,6 +386,9 @@ class JsepTransportController : public sigslot::has_slots<> {
   void OnTransportGatheringState_n(cricket::IceTransportInternal* transport);
   void OnTransportCandidateGathered_n(cricket::IceTransportInternal* transport,
                                       const cricket::Candidate& candidate);
+  void OnTransportCandidateError_n(
+      cricket::IceTransportInternal* transport,
+      const cricket::IceCandidateErrorEvent& event);
   void OnTransportCandidatesRemoved_n(cricket::IceTransportInternal* transport,
                                       const cricket::Candidates& candidates);
   void OnTransportRoleConflict_n(cricket::IceTransportInternal* transport);
@@ -379,12 +423,6 @@ class JsepTransportController : public sigslot::has_slots<> {
   cricket::IceGatheringState ice_gathering_state_ = cricket::kIceGatheringNew;
 
   Config config_;
-  // Determines if Config::media_transport_factory should be used
-  // to create a media transport. (when falling back to RTP this may be false).
-  // This is a prerequisite, but is not sufficient to create media transport
-  // (the factory needs to be provided in the config, and config must allow for
-  // media transport).
-  bool is_media_transport_factory_enabled_ = true;
 
   // Early on in the call we don't know if media transport is going to be used,
   // but we need to get the server-supported parameters to add to an SDP.
@@ -400,6 +438,22 @@ class JsepTransportController : public sigslot::has_slots<> {
   // be repeated.
   absl::optional<cricket::SessionDescription::MediaTransportSetting>
       media_transport_offer_settings_;
+
+  // Early on in the call we don't know if datagram transport is going to be
+  // used, but we need to get the server-supported parameters to add to an SDP.
+  // This server datagram transport will be promoted to the used datagram
+  // transport after the local description is set, and the ownership will be
+  // transferred to the actual JsepTransport. This "offer" datagram transport is
+  // not created if it's done on the party that provides answer. This offer
+  // datagram transport is only created once at the beginning of the connection,
+  // and never again.
+  std::unique_ptr<DatagramTransportInterface> offer_datagram_transport_ =
+      nullptr;
+
+  // Contains the offer of the |offer_datagram_transport_|, in case if it needs
+  // to be repeated.
+  absl::optional<cricket::SessionDescription::MediaTransportSetting>
+      datagram_transport_offer_settings_;
 
   // When the new offer is regenerated (due to upgrade), we don't want to
   // re-create media transport. New streams might be created; but media

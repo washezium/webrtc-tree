@@ -8,6 +8,8 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "modules/rtp_rtcp/source/rtp_sender_audio.h"
+
 #include <vector>
 
 #include "api/transport/field_trial_based_config.h"
@@ -16,7 +18,6 @@
 #include "modules/rtp_rtcp/source/rtp_header_extensions.h"
 #include "modules/rtp_rtcp/source/rtp_packet_received.h"
 #include "modules/rtp_rtcp/source/rtp_sender.h"
-#include "modules/rtp_rtcp/source/rtp_sender_audio.h"
 #include "test/gmock.h"
 #include "test/gtest.h"
 
@@ -64,26 +65,15 @@ class RtpSenderAudioTest : public ::testing::Test {
  public:
   RtpSenderAudioTest()
       : fake_clock_(kStartTime),
-        rtp_sender_(true,
-                    &fake_clock_,
-                    &transport_,
-                    nullptr,
-                    absl::nullopt,
-                    nullptr,
-                    nullptr,
-                    nullptr,
-                    nullptr,
-                    nullptr,
-                    nullptr,
-                    nullptr,
-                    nullptr,
-                    false,
-                    nullptr,
-                    false,
-                    false,
-                    FieldTrialBasedConfig()),
+        rtp_sender_([&] {
+          RtpRtcp::Configuration config;
+          config.audio = true;
+          config.clock = &fake_clock_;
+          config.outgoing_transport = &transport_;
+          config.media_send_ssrc = kSsrc;
+          return config;
+        }()),
         rtp_sender_audio_(&fake_clock_, &rtp_sender_) {
-    rtp_sender_.SetSSRC(kSsrc);
     rtp_sender_.SetSequenceNumber(kSeqNum);
   }
 
@@ -100,8 +90,9 @@ TEST_F(RtpSenderAudioTest, SendAudio) {
                    payload_name, payload_type, 48000, 0, 1500));
   uint8_t payload[] = {47, 11, 32, 93, 89};
 
-  ASSERT_TRUE(rtp_sender_audio_.SendAudio(kAudioFrameCN, payload_type, 4321,
-                                          payload, sizeof(payload)));
+  ASSERT_TRUE(rtp_sender_audio_.SendAudio(AudioFrameType::kAudioFrameCN,
+                                          payload_type, 4321, payload,
+                                          sizeof(payload)));
 
   auto sent_payload = transport_.last_sent_packet().payload();
   EXPECT_THAT(sent_payload, ElementsAreArray(payload));
@@ -119,8 +110,9 @@ TEST_F(RtpSenderAudioTest, SendAudioWithAudioLevelExtension) {
 
   uint8_t payload[] = {47, 11, 32, 93, 89};
 
-  ASSERT_TRUE(rtp_sender_audio_.SendAudio(kAudioFrameCN, payload_type, 4321,
-                                          payload, sizeof(payload)));
+  ASSERT_TRUE(rtp_sender_audio_.SendAudio(AudioFrameType::kAudioFrameCN,
+                                          payload_type, 4321, payload,
+                                          sizeof(payload)));
 
   auto sent_payload = transport_.last_sent_packet().payload();
   EXPECT_THAT(sent_payload, ElementsAreArray(payload));
@@ -158,19 +150,22 @@ TEST_F(RtpSenderAudioTest, CheckMarkerBitForTelephoneEvents) {
   // During start, it takes the starting timestamp as last sent timestamp.
   // The duration is calculated as the difference of current and last sent
   // timestamp. So for first call it will skip since the duration is zero.
-  ASSERT_TRUE(rtp_sender_audio_.SendAudio(kEmptyFrame, kPayloadType,
-                                          capture_timestamp, nullptr, 0));
+  ASSERT_TRUE(rtp_sender_audio_.SendAudio(AudioFrameType::kEmptyFrame,
+                                          kPayloadType, capture_timestamp,
+                                          nullptr, 0));
   // DTMF Sample Length is (Frequency/1000) * Duration.
   // So in this case, it is (8000/1000) * 500 = 4000.
   // Sending it as two packets.
-  ASSERT_TRUE(rtp_sender_audio_.SendAudio(
-      kEmptyFrame, kPayloadType, capture_timestamp + 2000, nullptr, 0));
+  ASSERT_TRUE(
+      rtp_sender_audio_.SendAudio(AudioFrameType::kEmptyFrame, kPayloadType,
+                                  capture_timestamp + 2000, nullptr, 0));
 
   // Marker Bit should be set to 1 for first packet.
   EXPECT_TRUE(transport_.last_sent_packet().Marker());
 
-  ASSERT_TRUE(rtp_sender_audio_.SendAudio(
-      kEmptyFrame, kPayloadType, capture_timestamp + 4000, nullptr, 0));
+  ASSERT_TRUE(
+      rtp_sender_audio_.SendAudio(AudioFrameType::kEmptyFrame, kPayloadType,
+                                  capture_timestamp + 4000, nullptr, 0));
   // Marker Bit should be set to 0 for rest of the packets.
   EXPECT_FALSE(transport_.last_sent_packet().Marker());
 }

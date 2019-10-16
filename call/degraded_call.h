@@ -13,6 +13,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
 #include <memory>
 
 #include "absl/types/optional.h"
@@ -34,7 +35,6 @@
 #include "call/video_send_stream.h"
 #include "modules/include/module.h"
 #include "modules/utility/include/process_thread.h"
-#include "rtc_base/bitrate_allocation_strategy.h"
 #include "rtc_base/copy_on_write_buffer.h"
 #include "rtc_base/network/sent_packet.h"
 #include "system_wrappers/include/clock.h"
@@ -106,10 +106,6 @@ class DegradedCall : public Call, private Transport, private PacketReceiver {
 
   Stats GetStats() const override;
 
-  void SetBitrateAllocationStrategy(
-      std::unique_ptr<rtc::BitrateAllocationStrategy>
-          bitrate_allocation_strategy) override;
-
   void SignalChannelNetworkState(MediaType media, NetworkState state) override;
   void OnAudioTransportOverheadChanged(
       int transport_overhead_per_packet) override;
@@ -133,6 +129,8 @@ class DegradedCall : public Call, private Transport, private PacketReceiver {
   const std::unique_ptr<Call> call_;
 
   void MediaTransportChange(MediaTransportInterface* media_transport) override;
+  void SetClientBitratePreferences(
+      const webrtc::BitrateSettings& preferences) override {}
   const absl::optional<BuiltInNetworkBehaviorConfig> send_config_;
   const std::unique_ptr<ProcessThread> send_process_thread_;
   SimulatedNetwork* send_simulated_network_;

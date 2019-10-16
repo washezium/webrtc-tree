@@ -16,8 +16,10 @@
 #include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/memory/memory.h"
 #include "api/media_transport_interface.h"
+#include "api/test/fake_datagram_transport.h"
 
 namespace webrtc {
 
@@ -85,16 +87,13 @@ class FakeMediaTransport : public MediaTransportInterface {
 
   void AddTargetTransferRateObserver(
       webrtc::TargetTransferRateObserver* observer) override {
-    RTC_CHECK(std::find(target_rate_observers_.begin(),
-                        target_rate_observers_.end(),
-                        observer) == target_rate_observers_.end());
+    RTC_CHECK(!absl::c_linear_search(target_rate_observers_, observer));
     target_rate_observers_.push_back(observer);
   }
 
   void RemoveTargetTransferRateObserver(
       webrtc::TargetTransferRateObserver* observer) override {
-    auto it = std::find(target_rate_observers_.begin(),
-                        target_rate_observers_.end(), observer);
+    auto it = absl::c_find(target_rate_observers_, observer);
     if (it != target_rate_observers_.end()) {
       target_rate_observers_.erase(it);
     }
@@ -102,6 +101,16 @@ class FakeMediaTransport : public MediaTransportInterface {
 
   void SetAllocatedBitrateLimits(
       const MediaTransportAllocatedBitrateLimits& limits) override {}
+
+  void SetTargetBitrateLimits(const MediaTransportTargetRateConstraints&
+                                  target_rate_constraints) override {
+    target_rate_constraints_in_order_.push_back(target_rate_constraints);
+  }
+
+  const std::vector<MediaTransportTargetRateConstraints>&
+  target_rate_constraints_in_order() {
+    return target_rate_constraints_in_order_;
+  }
 
   int target_rate_observers_size() { return target_rate_observers_.size(); }
 
@@ -133,9 +142,13 @@ class FakeMediaTransport : public MediaTransportInterface {
   const absl::optional<std::string> transport_offer_;
   const absl::optional<std::string> remote_transport_parameters_;
   bool is_connected_ = false;
+  std::vector<MediaTransportTargetRateConstraints>
+      target_rate_constraints_in_order_;
 };
 
 // Fake media transport factory creates fake media transport.
+// Also creates fake datagram transport, since both media and datagram
+// transports are created by |MediaTransportFactory|.
 class FakeMediaTransportFactory : public MediaTransportFactory {
  public:
   explicit FakeMediaTransportFactory(
@@ -162,6 +175,13 @@ class FakeMediaTransportFactory : public MediaTransportFactory {
         absl::make_unique<FakeMediaTransport>(
             settings, transport_offer_, settings.remote_transport_parameters);
     return std::move(media_transport);
+  }
+
+  RTCErrorOr<std::unique_ptr<DatagramTransportInterface>>
+  CreateDatagramTransport(rtc::Thread* network_thread,
+                          const MediaTransportSettings& settings) override {
+    return std::unique_ptr<DatagramTransportInterface>(
+        new FakeDatagramTransport(settings, transport_offer_.value_or("")));
   }
 
  private:

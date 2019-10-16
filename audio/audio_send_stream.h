@@ -14,6 +14,7 @@
 #include <memory>
 #include <vector>
 
+#include "audio/audio_level.h"
 #include "audio/channel_send.h"
 #include "audio/transport_feedback_packet_loss_tracker.h"
 #include "call/audio_send_stream.h"
@@ -23,6 +24,7 @@
 #include "rtc_base/constructor_magic.h"
 #include "rtc_base/experiments/audio_allocation_settings.h"
 #include "rtc_base/race_checker.h"
+#include "rtc_base/task_queue.h"
 #include "rtc_base/thread_checker.h"
 
 namespace webrtc {
@@ -42,7 +44,7 @@ class AudioSendStream final : public webrtc::AudioSendStream,
   AudioSendStream(Clock* clock,
                   const webrtc::AudioSendStream::Config& config,
                   const rtc::scoped_refptr<webrtc::AudioState>& audio_state,
-                  rtc::TaskQueue* worker_queue,
+                  TaskQueueFactory* task_queue_factory,
                   ProcessThread* module_process_thread,
                   RtpTransportControllerSendInterface* rtp_transport,
                   BitrateAllocatorInterface* bitrate_allocator,
@@ -53,7 +55,7 @@ class AudioSendStream final : public webrtc::AudioSendStream,
   AudioSendStream(Clock* clock,
                   const webrtc::AudioSendStream::Config& config,
                   const rtc::scoped_refptr<webrtc::AudioState>& audio_state,
-                  rtc::TaskQueue* worker_queue,
+                  TaskQueueFactory* task_queue_factory,
                   RtpTransportControllerSendInterface* rtp_transport,
                   BitrateAllocatorInterface* bitrate_allocator,
                   RtcEventLog* event_log,
@@ -78,7 +80,7 @@ class AudioSendStream final : public webrtc::AudioSendStream,
       bool has_remote_tracks) const override;
 
   void SignalNetworkState(NetworkState state);
-  bool DeliverRtcp(const uint8_t* packet, size_t length);
+  void DeliverRtcp(const uint8_t* packet, size_t length);
 
   // Implements BitrateAllocatorObserver.
   uint32_t OnBitrateUpdated(BitrateAllocationUpdate update) override;
@@ -103,6 +105,11 @@ class AudioSendStream final : public webrtc::AudioSendStream,
 
  private:
   class TimedTransport;
+  // Constraints including overhead.
+  struct TargetAudioBitrateConstraints {
+    DataRate min;
+    DataRate max;
+  };
 
   internal::AudioState* audio_state();
   const internal::AudioState* audio_state() const;
@@ -122,10 +129,12 @@ class AudioSendStream final : public webrtc::AudioSendStream,
   static void ReconfigureBitrateObserver(AudioSendStream* stream,
                                          const Config& new_config);
 
-  void ConfigureBitrateObserver(int min_bitrate_bps,
-                                int max_bitrate_bps,
-                                double bitrate_priority);
+  void ConfigureBitrateObserver() RTC_RUN_ON(worker_queue_);
   void RemoveBitrateObserver();
+
+  // Returns bitrate constraints, maybe including overhead when enabled by
+  // field trial.
+  TargetAudioBitrateConstraints GetMinMaxBitrateConstraints() const;
 
   // Sets per-packet overhead on encoded (for ANA) based on current known values
   // of transport and packetization overheads.
@@ -152,8 +161,13 @@ class AudioSendStream final : public webrtc::AudioSendStream,
   int encoder_sample_rate_hz_ = 0;
   size_t encoder_num_channels_ = 0;
   bool sending_ = false;
+  rtc::CriticalSection audio_level_lock_;
+  // Keeps track of audio level, total audio energy and total samples duration.
+  // https://w3c.github.io/webrtc-stats/#dom-rtcaudiohandlerstats-totalaudioenergy
+  webrtc::voe::AudioLevel audio_level_;
 
-  BitrateAllocatorInterface* const bitrate_allocator_;
+  BitrateAllocatorInterface* const bitrate_allocator_
+      RTC_GUARDED_BY(worker_queue_);
   RtpTransportControllerSendInterface* const rtp_transport_;
 
   rtc::CriticalSection packet_loss_tracker_cs_;
@@ -186,6 +200,9 @@ class AudioSendStream final : public webrtc::AudioSendStream,
   // Current audio packetization overhead (RTP or Media Transport).
   size_t audio_overhead_per_packet_bytes_
       RTC_GUARDED_BY(overhead_per_packet_lock_) = 0;
+
+  bool registered_with_allocator_ RTC_GUARDED_BY(worker_queue_) = false;
+  size_t total_packet_overhead_bytes_ RTC_GUARDED_BY(worker_queue_) = 0;
 
   RTC_DISALLOW_IMPLICIT_CONSTRUCTORS(AudioSendStream);
 };

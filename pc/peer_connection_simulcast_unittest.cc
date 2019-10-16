@@ -15,6 +15,8 @@
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
 #include "api/create_peerconnection_factory.h"
+#include "api/media_types.h"
+#include "api/rtc_error.h"
 #include "api/rtp_transceiver_interface.h"
 #include "api/uma_metrics.h"
 #include "api/video_codecs/builtin_video_decoder_factory.h"
@@ -87,7 +89,7 @@ std::vector<SimulcastLayer> CreateLayers(int num_layers, bool active) {
 }  // namespace
 namespace webrtc {
 
-class PeerConnectionSimulcastTests : public testing::Test {
+class PeerConnectionSimulcastTests : public ::testing::Test {
  public:
   PeerConnectionSimulcastTests()
       : pc_factory_(
@@ -254,6 +256,16 @@ TEST_F(PeerConnectionSimulcastTests, MustSupplyAllOrNoRidsInSimulcast) {
   EXPECT_EQ(RTCErrorType::INVALID_PARAMETER, error.error().type());
 }
 
+// Validates that an error is returned when illegal RIDs are supplied.
+TEST_F(PeerConnectionSimulcastTests, ChecksForIllegalRidValues) {
+  auto pc_wrapper = CreatePeerConnectionWrapper();
+  auto pc = pc_wrapper->pc();
+  auto layers = CreateLayers({"f", "h", "~q"}, true);
+  auto init = CreateTransceiverInit(layers);
+  auto error = pc->AddTransceiver(cricket::MEDIA_TYPE_VIDEO, init);
+  EXPECT_EQ(RTCErrorType::INVALID_PARAMETER, error.error().type());
+}
+
 // Validates that a single RID is removed from the encoding layer.
 TEST_F(PeerConnectionSimulcastTests, SingleRidIsRemovedFromSessionDescription) {
   auto pc = CreatePeerConnectionWrapper();
@@ -394,8 +406,8 @@ TEST_F(PeerConnectionSimulcastTests, SimulcastRejectedRemovesExtraLayers) {
 TEST_F(PeerConnectionSimulcastTests, RejectedSimulcastLayersAreDeactivated) {
   auto local = CreatePeerConnectionWrapper();
   auto remote = CreatePeerConnectionWrapper();
-  auto layers = CreateLayers({"1", "2", "3", "4"}, true);
-  auto expected_layers = CreateLayers({"2", "3", "4"}, true);
+  auto layers = CreateLayers({"1", "2", "3"}, true);
+  auto expected_layers = CreateLayers({"2", "3"}, true);
   auto transceiver = AddTransceiver(local.get(), layers);
   auto offer = local->CreateOfferAndSetAsLocal();
   {

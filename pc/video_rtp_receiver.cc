@@ -11,12 +11,15 @@
 #include "pc/video_rtp_receiver.h"
 
 #include <stddef.h>
+
 #include <utility>
 #include <vector>
 
 #include "api/media_stream_proxy.h"
 #include "api/media_stream_track_proxy.h"
 #include "api/video_track_source_proxy.h"
+#include "pc/jitter_buffer_delay.h"
+#include "pc/jitter_buffer_delay_proxy.h"
 #include "pc/media_stream.h"
 #include "pc/video_track.h"
 #include "rtc_base/checks.h"
@@ -39,7 +42,7 @@ VideoRtpReceiver::VideoRtpReceiver(
     const std::vector<rtc::scoped_refptr<MediaStreamInterface>>& streams)
     : worker_thread_(worker_thread),
       id_(receiver_id),
-      source_(new RefCountedObject<VideoRtpTrackSource>(worker_thread_)),
+      source_(new RefCountedObject<VideoRtpTrackSource>()),
       track_(VideoTrackProxy::Create(
           rtc::Thread::Current(),
           worker_thread,
@@ -49,7 +52,11 @@ VideoRtpReceiver::VideoRtpReceiver(
                                             worker_thread,
                                             source_),
               worker_thread))),
-      attachment_id_(GenerateUniqueId()) {
+      attachment_id_(GenerateUniqueId()),
+      delay_(JitterBufferDelayProxy::Create(
+          rtc::Thread::Current(),
+          worker_thread,
+          new rtc::RefCountedObject<JitterBufferDelay>(worker_thread))) {
   RTC_DCHECK(worker_thread_);
   SetStreams(streams);
   source_->SetState(MediaSourceInterface::kLive);
@@ -123,7 +130,7 @@ void VideoRtpReceiver::Stop() {
     // media channel has already been deleted.
     SetSink(nullptr);
   }
-  source_->Stop();
+  delay_->OnStop();
   stopped_ = true;
 }
 
@@ -144,7 +151,7 @@ void VideoRtpReceiver::SetupMediaChannel(uint32_t ssrc) {
   MaybeAttachFrameDecryptorToMediaChannel(
       ssrc_, worker_thread_, frame_decryptor_, media_channel_, stopped_);
 
-  source_->Start(media_channel_, ssrc);
+  delay_->OnStart(media_channel_, ssrc);
 }
 
 void VideoRtpReceiver::set_stream_ids(std::vector<std::string> stream_ids) {
@@ -190,6 +197,11 @@ void VideoRtpReceiver::SetObserver(RtpReceiverObserverInterface* observer) {
   if (received_first_packet_ && observer_) {
     observer_->OnFirstPacketReceived(media_type());
   }
+}
+
+void VideoRtpReceiver::SetJitterBufferMinimumDelay(
+    absl::optional<double> delay_seconds) {
+  delay_->Set(delay_seconds);
 }
 
 void VideoRtpReceiver::SetMediaChannel(cricket::MediaChannel* media_channel) {

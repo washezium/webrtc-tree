@@ -29,7 +29,7 @@ VCMFrameBuffer::VCMFrameBuffer()
 
 VCMFrameBuffer::~VCMFrameBuffer() {}
 
-webrtc::FrameType VCMFrameBuffer::FrameType() const {
+webrtc::VideoFrameType VCMFrameBuffer::FrameType() const {
   return _sessionInfo.FrameType();
 }
 
@@ -77,10 +77,9 @@ bool VCMFrameBuffer::IsSessionComplete() const {
 }
 
 // Insert packet
-VCMFrameBufferEnum VCMFrameBuffer::InsertPacket(
-    const VCMPacket& packet,
-    int64_t timeInMs,
-    const FrameData& frame_data) {
+VCMFrameBufferEnum VCMFrameBuffer::InsertPacket(const VCMPacket& packet,
+                                                int64_t timeInMs,
+                                                const FrameData& frame_data) {
   TRACE_EVENT0("webrtc", "VCMFrameBuffer::InsertPacket");
   assert(!(NULL == packet.dataPtr && packet.sizeBytes > 0));
   if (packet.dataPtr != NULL) {
@@ -94,7 +93,7 @@ VCMFrameBufferEnum VCMFrameBuffer::InsertPacket(
     // We only take the ntp timestamp of the first packet of a frame.
     ntp_time_ms_ = packet.ntp_time_ms_;
     _codec = packet.codec();
-    if (packet.frameType != kEmptyFrame) {
+    if (packet.video_header.frame_type != VideoFrameType::kEmptyFrame) {
       // first media packet
       SetState(kStateIncomplete);
     }
@@ -102,8 +101,7 @@ VCMFrameBufferEnum VCMFrameBuffer::InsertPacket(
 
   uint32_t requiredSizeBytes =
       size() + packet.sizeBytes +
-      (packet.insertStartCode ? kH264StartCodeLengthBytes : 0) +
-      EncodedImage::GetBufferPaddingBytes(packet.codec());
+      (packet.insertStartCode ? kH264StartCodeLengthBytes : 0);
   if (requiredSizeBytes >= capacity()) {
     const uint8_t* prevBuffer = data();
     const uint32_t increments =

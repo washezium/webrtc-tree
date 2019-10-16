@@ -8,17 +8,21 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "pc/channel.h"
+
 #include <iterator>
 #include <utility>
-
-#include "pc/channel.h"
 
 #include "absl/algorithm/container.h"
 #include "absl/memory/memory.h"
 #include "api/call/audio_sink.h"
+#include "api/media_transport_config.h"
 #include "media/base/media_constants.h"
 #include "media/base/rtp_utils.h"
 #include "modules/rtp_rtcp/source/rtp_packet_received.h"
+#include "p2p/base/packet_transport_internal.h"
+#include "pc/channel_manager.h"
+#include "pc/rtp_media_utils.h"
 #include "rtc_base/bind.h"
 #include "rtc_base/byte_order.h"
 #include "rtc_base/checks.h"
@@ -28,9 +32,6 @@
 #include "rtc_base/network_route.h"
 #include "rtc_base/strings/string_builder.h"
 #include "rtc_base/trace_event.h"
-#include "p2p/base/packet_transport_internal.h"
-#include "pc/channel_manager.h"
-#include "pc/rtp_media_utils.h"
 
 namespace cricket {
 using rtc::Bind;
@@ -93,11 +94,6 @@ static void SafeSetError(const std::string& message, std::string* error_desc) {
   }
 }
 
-static bool ValidPacket(bool rtcp, const rtc::CopyOnWriteBuffer* packet) {
-  // Check the packet size. We could check the header too if needed.
-  return packet && IsValidRtpRtcpPacketSize(rtcp, packet->size());
-}
-
 template <class Codec>
 void RtpParametersFromMediaDescription(
     const MediaContentDescriptionImpl<Codec>* desc,
@@ -115,6 +111,7 @@ void RtpParametersFromMediaDescription(
     params->extensions = extensions;
   }
   params->rtcp.reduced_size = desc->rtcp_reduced_size();
+  params->rtcp.remote_estimate = desc->remote_estimate();
 }
 
 template <class Codec>
@@ -153,8 +150,8 @@ BaseChannel::~BaseChannel() {
   TRACE_EVENT0("webrtc", "BaseChannel::~BaseChannel");
   RTC_DCHECK_RUN_ON(worker_thread_);
 
-  if (media_transport_) {
-    media_transport_->RemoveNetworkChangeCallback(this);
+  if (media_transport_config_.media_transport) {
+    media_transport_config_.media_transport->RemoveNetworkChangeCallback(this);
   }
 
   // Eats any outstanding messages or packets.
@@ -179,7 +176,7 @@ bool BaseChannel::ConnectToRtpTransport() {
 
   // If media transport is used, it's responsible for providing network
   // route changed callbacks.
-  if (!media_transport_) {
+  if (!media_transport_config_.media_transport) {
     rtp_transport_->SignalNetworkRouteChanged.connect(
         this, &BaseChannel::OnNetworkRouteChanged);
   }
@@ -202,29 +199,30 @@ void BaseChannel::DisconnectFromRtpTransport() {
   rtp_transport_->SignalSentPacket.disconnect(this);
 }
 
-void BaseChannel::Init_w(webrtc::RtpTransportInternal* rtp_transport,
-                         webrtc::MediaTransportInterface* media_transport) {
+void BaseChannel::Init_w(
+    webrtc::RtpTransportInternal* rtp_transport,
+    const webrtc::MediaTransportConfig& media_transport_config) {
   RTC_DCHECK_RUN_ON(worker_thread_);
-  media_transport_ = media_transport;
+  media_transport_config_ = media_transport_config;
 
   network_thread_->Invoke<void>(
       RTC_FROM_HERE, [this, rtp_transport] { SetRtpTransport(rtp_transport); });
 
   // Both RTP and RTCP channels should be set, we can call SetInterface on
   // the media channel and it can set network options.
-  media_channel_->SetInterface(this, media_transport);
+  media_channel_->SetInterface(this, media_transport_config);
 
-  RTC_LOG(LS_INFO) << "BaseChannel::Init_w, media_transport="
-                   << (media_transport_ != nullptr);
-  if (media_transport_) {
-    media_transport_->AddNetworkChangeCallback(this);
+  RTC_LOG(LS_INFO) << "BaseChannel::Init_w, media_transport_config="
+                   << media_transport_config.DebugString();
+  if (media_transport_config_.media_transport) {
+    media_transport_config_.media_transport->AddNetworkChangeCallback(this);
   }
 }
 
 void BaseChannel::Deinit() {
   RTC_DCHECK(worker_thread_->IsCurrent());
   media_channel_->SetInterface(/*iface=*/nullptr,
-                               /*media_transport=*/nullptr);
+                               webrtc::MediaTransportConfig());
   // Packets arrive on the network thread, processing packets calls virtual
   // functions, so need to stop this process in Deinit that is called in
   // derived classes destructor.
@@ -257,8 +255,7 @@ bool BaseChannel::SetRtpTransport(webrtc::RtpTransportInternal* rtp_transport) {
 
   rtp_transport_ = rtp_transport;
   if (rtp_transport_) {
-    RTC_DCHECK(rtp_transport_->rtp_packet_transport());
-    transport_name_ = rtp_transport_->rtp_packet_transport()->transport_name();
+    transport_name_ = rtp_transport_->transport_name();
 
     if (!ConnectToRtpTransport()) {
       RTC_LOG(LS_ERROR) << "Failed to connect to the new RtpTransport.";
@@ -269,13 +266,11 @@ bool BaseChannel::SetRtpTransport(webrtc::RtpTransportInternal* rtp_transport) {
 
     // Set the cached socket options.
     for (const auto& pair : socket_options_) {
-      rtp_transport_->rtp_packet_transport()->SetOption(pair.first,
-                                                        pair.second);
+      rtp_transport_->SetRtpOption(pair.first, pair.second);
     }
-    if (rtp_transport_->rtcp_packet_transport()) {
+    if (!rtp_transport_->rtcp_mux_enabled()) {
       for (const auto& pair : rtcp_socket_options_) {
-        rtp_transport_->rtp_packet_transport()->SetOption(pair.first,
-                                                          pair.second);
+        rtp_transport_->SetRtcpOption(pair.first, pair.second);
       }
     }
   }
@@ -351,20 +346,17 @@ int BaseChannel::SetOption_n(SocketType type,
                              int value) {
   RTC_DCHECK(network_thread_->IsCurrent());
   RTC_DCHECK(rtp_transport_);
-  rtc::PacketTransportInternal* transport = nullptr;
   switch (type) {
     case ST_RTP:
-      transport = rtp_transport_->rtp_packet_transport();
       socket_options_.push_back(
           std::pair<rtc::Socket::Option, int>(opt, value));
-      break;
+      return rtp_transport_->SetRtpOption(opt, value);
     case ST_RTCP:
-      transport = rtp_transport_->rtcp_packet_transport();
       rtcp_socket_options_.push_back(
           std::pair<rtc::Socket::Option, int>(opt, value));
-      break;
+      return rtp_transport_->SetRtcpOption(opt, value);
   }
-  return transport ? transport->SetOption(opt, value) : -1;
+  return -1;
 }
 
 void BaseChannel::OnWritableState(bool writable) {
@@ -402,6 +394,8 @@ void BaseChannel::OnTransportReadyToSend(bool ready) {
 bool BaseChannel::SendPacket(bool rtcp,
                              rtc::CopyOnWriteBuffer* packet,
                              const rtc::PacketOptions& options) {
+  // Until all the code is migrated to use RtpPacketType instead of bool.
+  RtpPacketType packet_type = rtcp ? RtpPacketType::kRtcp : RtpPacketType::kRtp;
   // SendPacket gets called from MediaEngine, on a pacer or an encoder thread.
   // If the thread is not our network thread, we will post to our network
   // so that the real work happens on our network. This avoids us having to
@@ -430,9 +424,9 @@ bool BaseChannel::SendPacket(bool rtcp,
   }
 
   // Protect ourselves against crazy data.
-  if (!ValidPacket(rtcp, packet)) {
+  if (!IsValidRtpPacketSize(packet_type, packet->size())) {
     RTC_LOG(LS_ERROR) << "Dropping outgoing " << content_name_ << " "
-                      << RtpRtcpStringLiteral(rtcp)
+                      << RtpPacketTypeToString(packet_type)
                       << " packet: wrong size=" << packet->size();
     return false;
   }
@@ -524,7 +518,9 @@ void BaseChannel::OnPacketReceived(bool rtcp,
     //    for us to just eat packets here. This is all sidestepped if RTCP mux
     //    is used anyway.
     RTC_LOG(LS_WARNING)
-        << "Can't process incoming " << RtpRtcpStringLiteral(rtcp)
+        << "Can't process incoming "
+        << RtpPacketTypeToString(rtcp ? RtpPacketType::kRtcp
+                                      : RtpPacketType::kRtp)
         << " packet when SRTP is inactive and crypto is required";
     return;
   }
@@ -539,13 +535,10 @@ void BaseChannel::ProcessPacket(bool rtcp,
                                 int64_t packet_time_us) {
   RTC_DCHECK(worker_thread_->IsCurrent());
 
-  // Need to copy variable because OnRtcpReceived/OnPacketReceived
-  // requires non-const pointer to buffer. This doesn't memcpy the actual data.
-  rtc::CopyOnWriteBuffer data(packet);
   if (rtcp) {
-    media_channel_->OnRtcpReceived(&data, packet_time_us);
+    media_channel_->OnRtcpReceived(packet, packet_time_us);
   } else {
-    media_channel_->OnPacketReceived(&data, packet_time_us);
+    media_channel_->OnPacketReceived(packet, packet_time_us);
   }
 }
 
@@ -840,11 +833,13 @@ void BaseChannel::OnNetworkRouteChanged(
   OnNetworkRouteChanged(absl::make_optional(network_route));
 }
 
-void VoiceChannel::Init_w(webrtc::RtpTransportInternal* rtp_transport,
-                          webrtc::MediaTransportInterface* media_transport) {
-  BaseChannel::Init_w(rtp_transport, media_transport);
-  if (BaseChannel::media_transport()) {
-    this->media_transport()->SetFirstAudioPacketReceivedObserver(this);
+void VoiceChannel::Init_w(
+    webrtc::RtpTransportInternal* rtp_transport,
+    const webrtc::MediaTransportConfig& media_transport_config) {
+  BaseChannel::Init_w(rtp_transport, media_transport_config);
+  if (media_transport_config.media_transport) {
+    media_transport_config.media_transport->SetFirstAudioPacketReceivedObserver(
+        this);
   }
 }
 
@@ -1027,6 +1022,26 @@ bool VideoChannel::SetLocalContent_w(const MediaContentDescription* content,
 
   VideoRecvParameters recv_params = last_recv_params_;
   RtpParametersFromMediaDescription(video, rtp_header_extensions, &recv_params);
+
+  VideoSendParameters send_params = last_send_params_;
+  bool needs_send_params_update = false;
+  if (type == SdpType::kAnswer || type == SdpType::kPrAnswer) {
+    for (auto& send_codec : send_params.codecs) {
+      auto* recv_codec = FindMatchingCodec(recv_params.codecs, send_codec);
+      if (recv_codec) {
+        if (!recv_codec->packetization && send_codec.packetization) {
+          send_codec.packetization.reset();
+          needs_send_params_update = true;
+        } else if (recv_codec->packetization != send_codec.packetization) {
+          SafeSetError(
+              "Failed to set local answer due to invalid codec packetization.",
+              error_desc);
+          return false;
+        }
+      }
+    }
+  }
+
   if (!media_channel()->SetRecvParameters(recv_params)) {
     SafeSetError("Failed to set local video description recv parameters.",
                  error_desc);
@@ -1042,6 +1057,14 @@ bool VideoChannel::SetLocalContent_w(const MediaContentDescription* content,
   }
 
   last_recv_params_ = recv_params;
+
+  if (needs_send_params_update) {
+    if (!media_channel()->SetSendParameters(send_params)) {
+      SafeSetError("Failed to set send parameters.", error_desc);
+      return false;
+    }
+    last_send_params_ = send_params;
+  }
 
   // TODO(pthatcher): Move local streams into VideoSendParameters, and
   // only give it to the media channel once we have a remote
@@ -1083,14 +1106,39 @@ bool VideoChannel::SetRemoteContent_w(const MediaContentDescription* content,
   }
   send_params.mid = content_name();
 
-  bool parameters_applied = media_channel()->SetSendParameters(send_params);
+  VideoRecvParameters recv_params = last_recv_params_;
+  bool needs_recv_params_update = false;
+  if (type == SdpType::kAnswer || type == SdpType::kPrAnswer) {
+    for (auto& recv_codec : recv_params.codecs) {
+      auto* send_codec = FindMatchingCodec(send_params.codecs, recv_codec);
+      if (send_codec) {
+        if (!send_codec->packetization && recv_codec.packetization) {
+          recv_codec.packetization.reset();
+          needs_recv_params_update = true;
+        } else if (send_codec->packetization != recv_codec.packetization) {
+          SafeSetError(
+              "Failed to set remote answer due to invalid codec packetization.",
+              error_desc);
+          return false;
+        }
+      }
+    }
+  }
 
-  if (!parameters_applied) {
+  if (!media_channel()->SetSendParameters(send_params)) {
     SafeSetError("Failed to set remote video description send parameters.",
                  error_desc);
     return false;
   }
   last_send_params_ = send_params;
+
+  if (needs_recv_params_update) {
+    if (!media_channel()->SetRecvParameters(recv_params)) {
+      SafeSetError("Failed to set recv parameters.", error_desc);
+      return false;
+    }
+    last_recv_params_ = recv_params;
+  }
 
   // TODO(pthatcher): Move remote streams into VideoRecvParameters,
   // and only give it to the media channel once we have a local
@@ -1129,9 +1177,10 @@ RtpDataChannel::~RtpDataChannel() {
   Deinit();
 }
 
-void RtpDataChannel::Init_w(webrtc::RtpTransportInternal* rtp_transport,
-                            webrtc::MediaTransportInterface* media_transport) {
-  BaseChannel::Init_w(rtp_transport, /*media_transport=*/nullptr);
+void RtpDataChannel::Init_w(
+    webrtc::RtpTransportInternal* rtp_transport,
+    const webrtc::MediaTransportConfig& media_transport_config) {
+  BaseChannel::Init_w(rtp_transport, media_transport_config);
   media_channel()->SignalDataReceived.connect(this,
                                               &RtpDataChannel::OnDataReceived);
   media_channel()->SignalReadyToSend.connect(
@@ -1147,7 +1196,7 @@ bool RtpDataChannel::SendData(const SendDataParams& params,
 }
 
 bool RtpDataChannel::CheckDataChannelTypeFromContent(
-    const DataContentDescription* content,
+    const RtpDataContentDescription* content,
     std::string* error_desc) {
   bool is_sctp = ((content->protocol() == kMediaProtocolSctp) ||
                   (content->protocol() == kMediaProtocolDtlsSctp));
@@ -1173,7 +1222,7 @@ bool RtpDataChannel::SetLocalContent_w(const MediaContentDescription* content,
     return false;
   }
 
-  const DataContentDescription* data = content->as_data();
+  const RtpDataContentDescription* data = content->as_rtp_data();
 
   if (!CheckDataChannelTypeFromContent(data, error_desc)) {
     return false;
@@ -1227,7 +1276,12 @@ bool RtpDataChannel::SetRemoteContent_w(const MediaContentDescription* content,
     return false;
   }
 
-  const DataContentDescription* data = content->as_data();
+  const RtpDataContentDescription* data = content->as_rtp_data();
+
+  if (!data) {
+    RTC_LOG(LS_INFO) << "Accepting and ignoring non-RTP content description";
+    return true;
+  }
 
   // If the remote data doesn't have codecs, it must be empty, so ignore it.
   if (!data->has_codecs()) {

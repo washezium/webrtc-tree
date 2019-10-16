@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "absl/types/optional.h"
+#include "api/task_queue/task_queue_factory.h"
 #include "api/test/video/function_video_decoder_factory.h"
 #include "api/test/video/function_video_encoder_factory.h"
 #include "api/video/video_bitrate_allocator_factory.h"
@@ -58,7 +59,8 @@ class CallTest : public ::testing::Test {
     kPayloadTypeH264 = 122,
     kPayloadTypeVP8 = 123,
     kPayloadTypeVP9 = 124,
-    kFakeVideoSendPayloadType = 125,
+    kPayloadTypeGeneric = 125,
+    kFakeVideoSendPayloadType = 126,
   };
   static const uint32_t kSendRtxSsrcs[kNumSsrcs];
   static const uint32_t kVideoSendSsrcs[kNumSsrcs];
@@ -67,7 +69,6 @@ class CallTest : public ::testing::Test {
   static const uint32_t kReceiverLocalVideoSsrc;
   static const uint32_t kReceiverLocalAudioSsrc;
   static const int kNackRtpHistoryMs;
-  static const uint8_t kDefaultKeepalivePayloadType;
   static const std::map<uint8_t, MediaType> payload_type_map_;
 
  protected:
@@ -175,6 +176,7 @@ class CallTest : public ::testing::Test {
 
   Clock* const clock_;
 
+  std::unique_ptr<TaskQueueFactory> task_queue_factory_;
   std::unique_ptr<webrtc::RtcEventLog> send_event_log_;
   std::unique_ptr<webrtc::RtcEventLog> recv_event_log_;
   std::unique_ptr<Call> sender_call_;
@@ -201,6 +203,10 @@ class CallTest : public ::testing::Test {
       DegradationPreference::MAINTAIN_FRAMERATE;
 
   std::unique_ptr<FecControllerFactoryInterface> fec_controller_factory_;
+  std::unique_ptr<NetworkStatePredictorFactoryInterface>
+      network_state_predictor_factory_;
+  std::unique_ptr<NetworkControllerFactoryInterface>
+      network_controller_factory_;
 
   test::FunctionVideoEncoderFactory fake_encoder_factory_;
   int fake_encoder_max_bitrate_ = -1;

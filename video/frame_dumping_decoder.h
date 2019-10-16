@@ -12,6 +12,7 @@
 #define VIDEO_FRAME_DUMPING_DECODER_H_
 
 #include <stdint.h>
+
 #include <memory>
 
 #include "api/video/encoded_image.h"
@@ -32,7 +33,6 @@ class FrameDumpingDecoder : public VideoDecoder {
                      int32_t number_of_cores) override;
   int32_t Decode(const EncodedImage& input_image,
                  bool missing_frames,
-                 const CodecSpecificInfo* codec_specific_info,
                  int64_t render_time_ms) override;
   int32_t RegisterDecodeCompleteCallback(
       DecodedImageCallback* callback) override;
@@ -42,6 +42,7 @@ class FrameDumpingDecoder : public VideoDecoder {
 
  private:
   std::unique_ptr<VideoDecoder> decoder_;
+  VideoCodecType codec_type_ = VideoCodecType::kVideoCodecGeneric;
   std::unique_ptr<IvfFileWriter> writer_;
 };
 

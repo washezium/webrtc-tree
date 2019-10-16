@@ -10,11 +10,16 @@
 
 #include "call/rampup_tests.h"
 
+#include <memory>
+
+#include "absl/flags/flag.h"
 #include "absl/memory/memory.h"
+#include "api/rtc_event_log/rtc_event_log_factory.h"
+#include "api/rtc_event_log_output_file.h"
+#include "api/task_queue/default_task_queue_factory.h"
+#include "api/task_queue/task_queue_factory.h"
 #include "call/fake_network_pipe.h"
-#include "logging/rtc_event_log/output/rtc_event_log_output_file.h"
 #include "rtc_base/checks.h"
-#include "rtc_base/flags.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/platform_thread.h"
 #include "rtc_base/string_encode.h"
@@ -22,6 +27,11 @@
 #include "test/field_trial.h"
 #include "test/gtest.h"
 #include "test/testsupport/perf_test.h"
+
+ABSL_FLAG(std::string,
+          ramp_dump_name,
+          "",
+          "Filename for dumped received RTP stream.");
 
 namespace webrtc {
 namespace {
@@ -41,10 +51,6 @@ std::vector<uint32_t> GenerateSsrcs(size_t num_streams, uint32_t ssrc_offset) {
   return ssrcs;
 }
 }  // namespace
-
-WEBRTC_DEFINE_string(ramp_dump_name,
-                     "",
-                     "Filename for dumped received RTP stream.");
 
 RampUpTester::RampUpTester(size_t num_video_streams,
                            size_t num_audio_streams,
@@ -575,11 +581,15 @@ void RampUpDownUpTester::EvolveTestState(int bitrate_bps, bool suspended) {
 
 class RampUpTest : public test::CallTest {
  public:
-  RampUpTest() {
-    std::string dump_name(FLAG_ramp_dump_name);
+  RampUpTest()
+      : task_queue_factory_(CreateDefaultTaskQueueFactory()),
+        rtc_event_log_factory_(task_queue_factory_.get()) {
+    std::string dump_name(absl::GetFlag(FLAGS_ramp_dump_name));
     if (!dump_name.empty()) {
-      send_event_log_ = RtcEventLog::Create(RtcEventLog::EncodingType::Legacy);
-      recv_event_log_ = RtcEventLog::Create(RtcEventLog::EncodingType::Legacy);
+      send_event_log_ = rtc_event_log_factory_.CreateRtcEventLog(
+          RtcEventLog::EncodingType::Legacy);
+      recv_event_log_ = rtc_event_log_factory_.CreateRtcEventLog(
+          RtcEventLog::EncodingType::Legacy);
       bool event_log_started =
           send_event_log_->StartLogging(
               absl::make_unique<RtcEventLogOutputFile>(
@@ -592,6 +602,10 @@ class RampUpTest : public test::CallTest {
       RTC_DCHECK(event_log_started);
     }
   }
+
+ private:
+  const std::unique_ptr<TaskQueueFactory> task_queue_factory_;
+  RtcEventLogFactory rtc_event_log_factory_;
 };
 
 static const uint32_t kStartBitrateBps = 60000;

@@ -224,6 +224,21 @@ struct LoggedIceCandidatePairEvent {
   uint32_t transaction_id;
 };
 
+struct LoggedRouteChangeEvent {
+  LoggedRouteChangeEvent() = default;
+  LoggedRouteChangeEvent(int64_t timestamp_ms,
+                         bool connected,
+                         uint32_t overhead)
+      : timestamp_ms(timestamp_ms), connected(connected), overhead(overhead) {}
+
+  int64_t log_time_us() const { return timestamp_ms * 1000; }
+  int64_t log_time_ms() const { return timestamp_ms; }
+
+  int64_t timestamp_ms;
+  bool connected;
+  uint32_t overhead;
+};
+
 struct LoggedRtpPacket {
   LoggedRtpPacket(uint64_t timestamp_us,
                   RTPHeader header,
@@ -392,7 +407,9 @@ struct LoggedRtcpPacketPli {
 };
 
 struct LoggedRtcpPacketTransportFeedback {
-  LoggedRtcpPacketTransportFeedback() = default;
+  LoggedRtcpPacketTransportFeedback()
+      : transport_feedback(/*include_timestamps=*/true, /*include_lost*/ true) {
+  }
   LoggedRtcpPacketTransportFeedback(
       int64_t timestamp_us,
       const rtcp::TransportFeedback& transport_feedback)
@@ -490,7 +507,9 @@ struct LoggedVideoSendConfig {
   rtclog::StreamConfig config;
 };
 
-struct LoggedRouteChangeEvent {
+struct InferredRouteChangeEvent {
+  int64_t log_time_ms() const { return log_time.ms(); }
+  int64_t log_time_us() const { return log_time.us(); }
   uint32_t route_id;
   Timestamp log_time = Timestamp::MinusInfinity();
   uint16_t send_overhead;
@@ -506,6 +525,8 @@ struct LoggedPacketInfo {
                    Timestamp capture_time);
   LoggedPacketInfo(const LoggedPacketInfo&);
   ~LoggedPacketInfo();
+  int64_t log_time_ms() const { return log_packet_time.ms(); }
+  int64_t log_time_us() const { return log_packet_time.us(); }
   uint32_t ssrc;
   uint16_t stream_seq_no;
   uint16_t size;

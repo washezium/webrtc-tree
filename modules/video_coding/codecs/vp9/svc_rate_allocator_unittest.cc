@@ -8,11 +8,11 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "modules/video_coding/codecs/vp9/svc_rate_allocator.h"
+
 #include <algorithm>
 
-#include "common_types.h"  // NOLINT(build/include)
 #include "modules/video_coding/codecs/vp9/svc_config.h"
-#include "modules/video_coding/codecs/vp9/svc_rate_allocator.h"
 #include "rtc_base/checks.h"
 #include "test/gtest.h"
 
@@ -198,8 +198,8 @@ TEST(SvcRateAllocatorTest, NoPaddingIfAllLayersAreDeactivated) {
 }
 
 class SvcRateAllocatorTestParametrizedContentType
-    : public testing::Test,
-      public testing::WithParamInterface<bool> {
+    : public ::testing::Test,
+      public ::testing::WithParamInterface<bool> {
  public:
   SvcRateAllocatorTestParametrizedContentType()
       : is_screen_sharing_(GetParam()) {}

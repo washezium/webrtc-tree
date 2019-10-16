@@ -12,6 +12,7 @@
 #define MODULES_AUDIO_PROCESSING_AEC3_AEC_STATE_H_
 
 #include <stddef.h>
+
 #include <array>
 #include <memory>
 #include <vector>
@@ -45,12 +46,14 @@ class AecState {
   // Returns whether the echo subtractor can be used to determine the residual
   // echo.
   bool UsableLinearEstimate() const {
-    return filter_quality_state_.LinearFilterUsable();
+    return filter_quality_state_.LinearFilterUsable() &&
+           config_.filter.use_linear_filter;
   }
 
   // Returns whether the echo subtractor output should be used as output.
   bool UseLinearFilterOutput() const {
-    return filter_quality_state_.LinearFilterUsable();
+    return filter_quality_state_.LinearFilterUsable() &&
+           config_.filter.use_linear_filter;
   }
 
   // Returns the estimated echo path gain.
@@ -66,7 +69,7 @@ class AecState {
   // Returns whether the stationary properties of the signals are used in the
   // aec.
   bool UseStationaryProperties() const {
-    return config_.echo_audibility.use_stationary_properties;
+    return config_.echo_audibility.use_stationarity_properties;
   }
 
   // Returns the ERLE.

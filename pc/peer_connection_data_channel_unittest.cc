@@ -22,6 +22,7 @@
 #include "api/peer_connection_interface.h"
 #include "api/peer_connection_proxy.h"
 #include "api/scoped_refptr.h"
+#include "api/task_queue/default_task_queue_factory.h"
 #include "api/test/fake_media_transport.h"
 #include "media/base/codec.h"
 #include "media/base/fake_media_engine.h"
@@ -41,6 +42,7 @@
 #include "rtc_base/ref_counted_object.h"
 #include "rtc_base/rtc_certificate_generator.h"
 #include "rtc_base/thread.h"
+#include "test/gmock.h"
 #include "test/gtest.h"
 #ifdef WEBRTC_ANDROID
 #include "pc/test/android_test_initializer.h"
@@ -53,6 +55,8 @@ namespace webrtc {
 
 using RTCConfiguration = PeerConnectionInterface::RTCConfiguration;
 using RTCOfferAnswerOptions = PeerConnectionInterface::RTCOfferAnswerOptions;
+using ::testing::HasSubstr;
+using ::testing::Not;
 using ::testing::Values;
 
 namespace {
@@ -68,6 +72,7 @@ PeerConnectionFactoryDependencies CreatePeerConnectionFactoryDependencies(
   deps.network_thread = network_thread;
   deps.worker_thread = worker_thread;
   deps.signaling_thread = signaling_thread;
+  deps.task_queue_factory = CreateDefaultTaskQueueFactory();
   deps.media_engine = std::move(media_engine);
   deps.call_factory = std::move(call_factory);
   deps.media_transport_factory = std::move(media_transport_factory);
@@ -193,14 +198,11 @@ class PeerConnectionDataChannelBaseTest : public ::testing::Test {
   // Changes the SCTP data channel port on the given session description.
   void ChangeSctpPortOnDescription(cricket::SessionDescription* desc,
                                    int port) {
-    cricket::DataCodec sctp_codec(cricket::kGoogleSctpDataCodecPlType,
-                                  cricket::kGoogleSctpDataCodecName);
-    sctp_codec.SetParam(cricket::kCodecParamPort, port);
-
     auto* data_content = cricket::GetFirstDataContent(desc);
     RTC_DCHECK(data_content);
-    auto* data_desc = data_content->media_description()->as_data();
-    data_desc->set_codecs({sctp_codec});
+    auto* data_desc = data_content->media_description()->as_sctp();
+    RTC_DCHECK(data_desc);
+    data_desc->set_port(port);
   }
 
   std::unique_ptr<rtc::VirtualSocketServer> vss_;
@@ -412,6 +414,32 @@ TEST_P(PeerConnectionDataChannelTest, MediaTransportWithoutSdesFails) {
   auto caller = CreatePeerConnectionWithDataChannel(config);
 
   EXPECT_EQ(nullptr, caller);
+}
+
+TEST_P(PeerConnectionDataChannelTest, ModernSdpSyntaxByDefault) {
+  PeerConnectionInterface::RTCOfferAnswerOptions options;
+  auto caller = CreatePeerConnectionWithDataChannel();
+  auto offer = caller->CreateOffer(options);
+  EXPECT_FALSE(cricket::GetFirstSctpDataContentDescription(offer->description())
+                   ->use_sctpmap());
+  std::string sdp;
+  offer->ToString(&sdp);
+  RTC_LOG(LS_ERROR) << sdp;
+  EXPECT_THAT(sdp, HasSubstr(" UDP/DTLS/SCTP webrtc-datachannel"));
+  EXPECT_THAT(sdp, Not(HasSubstr("a=sctpmap:")));
+}
+
+TEST_P(PeerConnectionDataChannelTest, ObsoleteSdpSyntaxIfSet) {
+  PeerConnectionInterface::RTCOfferAnswerOptions options;
+  options.use_obsolete_sctp_sdp = true;
+  auto caller = CreatePeerConnectionWithDataChannel();
+  auto offer = caller->CreateOffer(options);
+  EXPECT_TRUE(cricket::GetFirstSctpDataContentDescription(offer->description())
+                  ->use_sctpmap());
+  std::string sdp;
+  offer->ToString(&sdp);
+  EXPECT_THAT(sdp, Not(HasSubstr(" UDP/DTLS/SCTP webrtc-datachannel")));
+  EXPECT_THAT(sdp, HasSubstr("a=sctpmap:"));
 }
 
 INSTANTIATE_TEST_SUITE_P(PeerConnectionDataChannelTest,

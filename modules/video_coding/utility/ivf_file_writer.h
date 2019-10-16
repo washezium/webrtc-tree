@@ -13,10 +13,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
 #include <memory>
 
 #include "api/video/encoded_image.h"
-#include "common_types.h"  // NOLINT(build/include)
 #include "rtc_base/constructor_magic.h"
 #include "rtc_base/system/file_wrapper.h"
 #include "rtc_base/time_utils.h"

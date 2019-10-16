@@ -12,6 +12,7 @@
 #define RTC_BASE_COPY_ON_WRITE_BUFFER_H_
 
 #include <stdint.h>
+
 #include <algorithm>
 #include <cstring>
 #include <string>
@@ -29,7 +30,7 @@ class CopyOnWriteBuffer {
  public:
   // An empty buffer.
   CopyOnWriteBuffer();
-  // Copy size and contents of an existing buffer.
+  // Share the data with an existing buffer.
   CopyOnWriteBuffer(const CopyOnWriteBuffer& buf);
   // Move contents from an existing buffer.
   CopyOnWriteBuffer(CopyOnWriteBuffer&& buf);

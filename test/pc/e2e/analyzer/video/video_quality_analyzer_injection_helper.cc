@@ -15,20 +15,21 @@
 #include "absl/memory/memory.h"
 #include "test/pc/e2e/analyzer/video/quality_analyzing_video_decoder.h"
 #include "test/pc/e2e/analyzer/video/quality_analyzing_video_encoder.h"
+#include "test/pc/e2e/analyzer/video/simulcast_dummy_buffer_helper.h"
 
 namespace webrtc {
-namespace test {
+namespace webrtc_pc_e2e {
 
 namespace {
 
 // Intercepts generated frames and passes them also to video quality analyzer
 // and into video frame writer, if the last one is provided.
-class InterceptingFrameGenerator : public FrameGenerator {
+class InterceptingFrameGenerator : public test::FrameGenerator {
  public:
   InterceptingFrameGenerator(std::string stream_label,
-                             std::unique_ptr<FrameGenerator> delegate,
+                             std::unique_ptr<test::FrameGenerator> delegate,
                              VideoQualityAnalyzerInterface* analyzer,
-                             VideoFrameWriter* video_writer)
+                             test::VideoFrameWriter* video_writer)
       : stream_label_(std::move(stream_label)),
         delegate_(std::move(delegate)),
         analyzer_(analyzer),
@@ -54,9 +55,9 @@ class InterceptingFrameGenerator : public FrameGenerator {
 
  private:
   std::string stream_label_;
-  std::unique_ptr<FrameGenerator> delegate_;
+  std::unique_ptr<test::FrameGenerator> delegate_;
   VideoQualityAnalyzerInterface* analyzer_;
-  VideoFrameWriter* video_writer_;
+  test::VideoFrameWriter* video_writer_;
 };
 
 // Implements the video sink, that forwards rendered frames to the video quality
@@ -64,13 +65,17 @@ class InterceptingFrameGenerator : public FrameGenerator {
 class AnalyzingVideoSink : public rtc::VideoSinkInterface<VideoFrame> {
  public:
   AnalyzingVideoSink(VideoQualityAnalyzerInterface* analyzer,
-                     VideoFrameWriter* video_writer)
+                     test::VideoFrameWriter* video_writer)
       : analyzer_(analyzer), video_writer_(video_writer) {
     RTC_DCHECK(analyzer_);
   }
   ~AnalyzingVideoSink() override = default;
 
   void OnFrame(const VideoFrame& frame) override {
+    if (IsDummyFrameBuffer(frame.video_frame_buffer()->ToI420())) {
+      // This is dummy frame, so we  don't need to process it further.
+      return;
+    }
     analyzer_->OnFrameRendered(frame);
     if (video_writer_) {
       bool result = video_writer_->WriteFrame(frame);
@@ -81,7 +86,7 @@ class AnalyzingVideoSink : public rtc::VideoSinkInterface<VideoFrame> {
 
  private:
   VideoQualityAnalyzerInterface* analyzer_;
-  VideoFrameWriter* video_writer_;
+  test::VideoFrameWriter* video_writer_;
 };
 
 }  // namespace
@@ -103,10 +108,12 @@ VideoQualityAnalyzerInjectionHelper::~VideoQualityAnalyzerInjectionHelper() =
 std::unique_ptr<VideoEncoderFactory>
 VideoQualityAnalyzerInjectionHelper::WrapVideoEncoderFactory(
     std::unique_ptr<VideoEncoderFactory> delegate,
+    double bitrate_multiplier,
     std::map<std::string, absl::optional<int>> stream_required_spatial_index)
     const {
   return absl::make_unique<QualityAnalyzingVideoEncoderFactory>(
-      std::move(delegate), std::move(stream_required_spatial_index),
+      std::move(delegate), bitrate_multiplier,
+      std::move(stream_required_spatial_index),
       encoding_entities_id_generator_.get(), injector_, analyzer_.get());
 }
 
@@ -118,18 +125,18 @@ VideoQualityAnalyzerInjectionHelper::WrapVideoDecoderFactory(
       analyzer_.get());
 }
 
-std::unique_ptr<FrameGenerator>
+std::unique_ptr<test::FrameGenerator>
 VideoQualityAnalyzerInjectionHelper::WrapFrameGenerator(
     std::string stream_label,
-    std::unique_ptr<FrameGenerator> delegate,
-    VideoFrameWriter* writer) const {
+    std::unique_ptr<test::FrameGenerator> delegate,
+    test::VideoFrameWriter* writer) const {
   return absl::make_unique<InterceptingFrameGenerator>(
       std::move(stream_label), std::move(delegate), analyzer_.get(), writer);
 }
 
 std::unique_ptr<rtc::VideoSinkInterface<VideoFrame>>
 VideoQualityAnalyzerInjectionHelper::CreateVideoSink(
-    VideoFrameWriter* writer) const {
+    test::VideoFrameWriter* writer) const {
   return absl::make_unique<AnalyzingVideoSink>(analyzer_.get(), writer);
 }
 
@@ -139,7 +146,7 @@ void VideoQualityAnalyzerInjectionHelper::Start(std::string test_case_name,
 }
 
 void VideoQualityAnalyzerInjectionHelper::OnStatsReports(
-    absl::string_view pc_label,
+    const std::string& pc_label,
     const StatsReports& stats_reports) {
   analyzer_->OnStatsReports(pc_label, stats_reports);
 }
@@ -148,5 +155,5 @@ void VideoQualityAnalyzerInjectionHelper::Stop() {
   analyzer_->Stop();
 }
 
-}  // namespace test
+}  // namespace webrtc_pc_e2e
 }  // namespace webrtc

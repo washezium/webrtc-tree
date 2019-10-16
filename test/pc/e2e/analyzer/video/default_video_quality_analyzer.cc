@@ -20,12 +20,29 @@
 #include "test/testsupport/perf_test.h"
 
 namespace webrtc {
-namespace test {
+namespace webrtc_pc_e2e {
 namespace {
 
 constexpr int kMaxActiveComparisons = 10;
 constexpr int kFreezeThresholdMs = 150;
 constexpr int kMicrosPerSecond = 1000000;
+constexpr int kBitsInByte = 8;
+
+void LogFrameCounters(const std::string& name, const FrameCounters& counters) {
+  RTC_LOG(INFO) << "[" << name << "] Captured    : " << counters.captured;
+  RTC_LOG(INFO) << "[" << name << "] Pre encoded : " << counters.pre_encoded;
+  RTC_LOG(INFO) << "[" << name << "] Encoded     : " << counters.encoded;
+  RTC_LOG(INFO) << "[" << name << "] Received    : " << counters.received;
+  RTC_LOG(INFO) << "[" << name << "] Rendered    : " << counters.rendered;
+  RTC_LOG(INFO) << "[" << name << "] Dropped     : " << counters.dropped;
+}
+
+void LogStreamInternalStats(const std::string& name, const StreamStats& stats) {
+  RTC_LOG(INFO) << "[" << name
+                << "] Dropped by encoder     : " << stats.dropped_by_encoder;
+  RTC_LOG(INFO) << "[" << name << "] Dropped before encoder : "
+                << stats.dropped_before_encoder;
+}
 
 }  // namespace
 
@@ -65,7 +82,10 @@ void DefaultVideoQualityAnalyzer::Start(std::string test_case_name,
   }
   {
     rtc::CritScope crit(&lock_);
+    RTC_CHECK(start_time_.IsMinusInfinity());
+
     state_ = State::kActive;
+    start_time_ = Now();
   }
 }
 
@@ -74,6 +94,13 @@ uint16_t DefaultVideoQualityAnalyzer::OnFrameCaptured(
     const webrtc::VideoFrame& frame) {
   // |next_frame_id| is atomic, so we needn't lock here.
   uint16_t frame_id = next_frame_id_++;
+  Timestamp start_time = Timestamp::MinusInfinity();
+  {
+    rtc::CritScope crit(&lock_);
+    // Create a local copy of start_time_ to access it under |comparison_lock_|
+    // without holding a |lock_|
+    start_time = start_time_;
+  }
   {
     // Ensure stats for this stream exists.
     rtc::CritScope crit(&comparison_lock_);
@@ -82,7 +109,7 @@ uint16_t DefaultVideoQualityAnalyzer::OnFrameCaptured(
       // Assume that the first freeze was before first stream frame captured.
       // This way time before the first freeze would be counted as time between
       // freezes.
-      stream_last_freeze_end_time_.insert({stream_label, Now()});
+      stream_last_freeze_end_time_.insert({stream_label, start_time});
     }
   }
   {
@@ -105,8 +132,7 @@ uint16_t DefaultVideoQualityAnalyzer::OnFrameCaptured(
       state->frame_ids.pop_front();
       frame_counters_.dropped++;
       stream_frame_counters_[stream_label].dropped++;
-      AddComparison(it->second, state->last_rendered_frame, true,
-                    stats_it->second);
+      AddComparison(it->second, absl::nullopt, true, stats_it->second);
 
       captured_frames_in_flight_.erase(it);
       frame_stats_.erase(stats_it);
@@ -135,14 +161,15 @@ void DefaultVideoQualityAnalyzer::OnFrameEncoded(
     uint16_t frame_id,
     const webrtc::EncodedImage& encoded_image) {
   rtc::CritScope crit(&lock_);
-  // TODO(titovartem) we need to pick right spatial index here.
   auto it = frame_stats_.find(frame_id);
   RTC_DCHECK(it != frame_stats_.end());
-  RTC_DCHECK(it->second.encoded_time.IsInfinite())
-      << "Received multiple spatial layers for stream_label="
-      << it->second.stream_label;
-  frame_counters_.encoded++;
-  stream_frame_counters_[it->second.stream_label].encoded++;
+  // For SVC we can receive multiple encoded images for one frame, so to cover
+  // all cases we have to pick the last encode time.
+  if (it->second.encoded_time.IsInfinite()) {
+    // Increase counters only when we meet this frame first time.
+    frame_counters_.encoded++;
+    stream_frame_counters_[it->second.stream_label].encoded++;
+  }
   it->second.encoded_time = Now();
 }
 
@@ -154,7 +181,6 @@ void DefaultVideoQualityAnalyzer::OnFrameDropped(
 void DefaultVideoQualityAnalyzer::OnFrameReceived(
     uint16_t frame_id,
     const webrtc::EncodedImage& input_image) {
-  // TODO(titovartem) We should always receive only single spatial layer here.
   rtc::CritScope crit(&lock_);
   auto it = frame_stats_.find(frame_id);
   RTC_DCHECK(it != frame_stats_.end());
@@ -223,7 +249,7 @@ void DefaultVideoQualityAnalyzer::OnFrameRendered(
     auto dropped_frame_it = captured_frames_in_flight_.find(dropped_frame_id);
     RTC_CHECK(dropped_frame_it != captured_frames_in_flight_.end());
 
-    AddComparison(dropped_frame_it->second, state->last_rendered_frame, true,
+    AddComparison(dropped_frame_it->second, absl::nullopt, true,
                   dropped_frame_stats_it->second);
 
     frame_stats_.erase(dropped_frame_stats_it);
@@ -232,7 +258,6 @@ void DefaultVideoQualityAnalyzer::OnFrameRendered(
   RTC_DCHECK(!state->frame_ids.empty());
   state->frame_ids.pop_front();
 
-  state->last_rendered_frame = frame;
   if (state->last_rendered_frame_time) {
     frame_stats->prev_frame_rendered_time =
         state->last_rendered_frame_time.value();
@@ -286,10 +311,12 @@ void DefaultVideoQualityAnalyzer::Stop() {
     rtc::CritScope crit1(&lock_);
     rtc::CritScope crit2(&comparison_lock_);
     for (auto& item : stream_stats_) {
-      if (item.second.freeze_time_ms.IsEmpty()) {
-        continue;
-      }
       const StreamState& state = stream_states_[item.first];
+      // If there are no freezes in the call we have to report
+      // time_between_freezes_ms as call duration and in such case
+      // |stream_last_freeze_end_time_| for this stream will be |start_time_|.
+      // If there is freeze, then we need add time from last rendered frame
+      // to last freeze end as time between freezes.
       if (state.last_rendered_frame_time) {
         item.second.time_between_freezes_ms.AddSample(
             (state.last_rendered_frame_time.value() -
@@ -338,6 +365,59 @@ std::map<std::string, StreamStats> DefaultVideoQualityAnalyzer::GetStats()
 AnalyzerStats DefaultVideoQualityAnalyzer::GetAnalyzerStats() const {
   rtc::CritScope crit(&comparison_lock_);
   return analyzer_stats_;
+}
+
+// TODO(bugs.webrtc.org/10430): Migrate to the new GetStats as soon as
+// bugs.webrtc.org/10428 is fixed.
+void DefaultVideoQualityAnalyzer::OnStatsReports(
+    const std::string& pc_label,
+    const StatsReports& stats_reports) {
+  for (const StatsReport* stats_report : stats_reports) {
+    // The only stats collected by this analyzer are present in
+    // kStatsReportTypeBwe reports, so all other reports are just ignored.
+    if (stats_report->type() != StatsReport::StatsType::kStatsReportTypeBwe) {
+      continue;
+    }
+    const webrtc::StatsReport::Value* available_send_bandwidth =
+        stats_report->FindValue(
+            StatsReport::StatsValueName::kStatsValueNameAvailableSendBandwidth);
+    const webrtc::StatsReport::Value* retransmission_bitrate =
+        stats_report->FindValue(
+            StatsReport::StatsValueName::kStatsValueNameRetransmitBitrate);
+    const webrtc::StatsReport::Value* transmission_bitrate =
+        stats_report->FindValue(
+            StatsReport::StatsValueName::kStatsValueNameTransmitBitrate);
+    const webrtc::StatsReport::Value* actual_encode_bitrate =
+        stats_report->FindValue(
+            StatsReport::StatsValueName::kStatsValueNameActualEncBitrate);
+    const webrtc::StatsReport::Value* target_encode_bitrate =
+        stats_report->FindValue(
+            StatsReport::StatsValueName::kStatsValueNameTargetEncBitrate);
+    RTC_CHECK(available_send_bandwidth);
+    RTC_CHECK(retransmission_bitrate);
+    RTC_CHECK(transmission_bitrate);
+    RTC_CHECK(actual_encode_bitrate);
+    RTC_CHECK(target_encode_bitrate);
+
+    rtc::CritScope crit(&video_bwe_stats_lock_);
+    VideoBweStats& video_bwe_stats = video_bwe_stats_[pc_label];
+    video_bwe_stats.available_send_bandwidth.AddSample(
+        available_send_bandwidth->int_val());
+    video_bwe_stats.transmission_bitrate.AddSample(
+        transmission_bitrate->int_val());
+    video_bwe_stats.retransmission_bitrate.AddSample(
+        retransmission_bitrate->int_val());
+    video_bwe_stats.actual_encode_bitrate.AddSample(
+        actual_encode_bitrate->int_val());
+    video_bwe_stats.target_encode_bitrate.AddSample(
+        target_encode_bitrate->int_val());
+  }
+}
+
+std::map<std::string, VideoBweStats>
+DefaultVideoQualityAnalyzer::GetVideoBweStats() const {
+  rtc::CritScope crit(&video_bwe_stats_lock_);
+  return video_bwe_stats_;
 }
 
 void DefaultVideoQualityAnalyzer::AddComparison(
@@ -435,7 +515,7 @@ void DefaultVideoQualityAnalyzer::ProcessComparison(
   }
   // Next stats can be calculated only if frame was received on remote side.
   if (!comparison.dropped) {
-    stats->resolution_of_encoded_image.AddSample(
+    stats->resolution_of_rendered_frame.AddSample(
         *comparison.frame_stats.rendered_frame_width *
         *comparison.frame_stats.rendered_frame_height);
     stats->transport_time_ms.AddSample(
@@ -468,18 +548,60 @@ void DefaultVideoQualityAnalyzer::ProcessComparison(
   }
 }
 
-void DefaultVideoQualityAnalyzer::ReportResults() const {
+void DefaultVideoQualityAnalyzer::ReportResults() {
   rtc::CritScope crit1(&lock_);
   rtc::CritScope crit2(&comparison_lock_);
   for (auto& item : stream_stats_) {
     ReportResults(GetTestCaseName(item.first), item.second,
                   stream_frame_counters_.at(item.first));
   }
+  {
+    rtc::CritScope video_bwe_crit(&video_bwe_stats_lock_);
+    for (const auto& item : video_bwe_stats_) {
+      ReportVideoBweResults(GetTestCaseName(item.first), item.second);
+    }
+  }
+  LogFrameCounters("Global", frame_counters_);
+  for (auto& item : stream_stats_) {
+    LogFrameCounters(item.first, stream_frame_counters_.at(item.first));
+    LogStreamInternalStats(item.first, item.second);
+  }
+  if (!analyzer_stats_.comparisons_queue_size.IsEmpty()) {
+    RTC_LOG(INFO) << "comparisons_queue_size min="
+                  << analyzer_stats_.comparisons_queue_size.GetMin()
+                  << "; max=" << analyzer_stats_.comparisons_queue_size.GetMax()
+                  << "; 99%="
+                  << analyzer_stats_.comparisons_queue_size.GetPercentile(0.99);
+  }
+  RTC_LOG(INFO) << "comparisons_done=" << analyzer_stats_.comparisons_done;
+  RTC_LOG(INFO) << "overloaded_comparisons_done="
+                << analyzer_stats_.overloaded_comparisons_done;
 }
 
-void DefaultVideoQualityAnalyzer::ReportResults(std::string test_case_name,
-                                                StreamStats stats,
-                                                FrameCounters frame_counters) {
+void DefaultVideoQualityAnalyzer::ReportVideoBweResults(
+    const std::string& test_case_name,
+    const VideoBweStats& video_bwe_stats) {
+  ReportResult("available_send_bandwidth", test_case_name,
+               video_bwe_stats.available_send_bandwidth / kBitsInByte,
+               "bytesPerSecond");
+  ReportResult("transmission_bitrate", test_case_name,
+               video_bwe_stats.transmission_bitrate / kBitsInByte,
+               "bytesPerSecond");
+  ReportResult("retransmission_bitrate", test_case_name,
+               video_bwe_stats.retransmission_bitrate / kBitsInByte,
+               "bytesPerSecond");
+  ReportResult("actual_encode_bitrate", test_case_name,
+               video_bwe_stats.actual_encode_bitrate / kBitsInByte,
+               "bytesPerSecond");
+  ReportResult("target_encode_bitrate", test_case_name,
+               video_bwe_stats.target_encode_bitrate / kBitsInByte,
+               "bytesPerSecond");
+}
+
+void DefaultVideoQualityAnalyzer::ReportResults(
+    const std::string& test_case_name,
+    const StreamStats& stats,
+    const FrameCounters& frame_counters) {
   ReportResult("psnr", test_case_name, stats.psnr, "dB");
   ReportResult("ssim", test_case_name, stats.ssim, "unitless");
   ReportResult("transport_time", test_case_name, stats.transport_time_ms, "ms");
@@ -495,8 +617,9 @@ void DefaultVideoQualityAnalyzer::ReportResults(std::string test_case_name,
   ReportResult("encode_time", test_case_name, stats.encode_time_ms, "ms");
   ReportResult("time_between_freezes", test_case_name,
                stats.time_between_freezes_ms, "ms");
+  ReportResult("freeze_time_ms", test_case_name, stats.freeze_time_ms, "ms");
   ReportResult("pixels_per_frame", test_case_name,
-               stats.resolution_of_encoded_image, "unitless");
+               stats.resolution_of_rendered_frame, "unitless");
   test::PrintResult("min_psnr", "", test_case_name,
                     stats.psnr.IsEmpty() ? 0 : stats.psnr.GetMin(), "dB",
                     /*important=*/false);
@@ -526,7 +649,7 @@ std::string DefaultVideoQualityAnalyzer::GetTestCaseName(
 }
 
 Timestamp DefaultVideoQualityAnalyzer::Now() {
-  return Timestamp::us(clock_->TimeInMicroseconds());
+  return clock_->CurrentTime();
 }
 
 DefaultVideoQualityAnalyzer::FrameStats::FrameStats(std::string stream_label,
@@ -551,5 +674,5 @@ DefaultVideoQualityAnalyzer::FrameComparison::FrameComparison(
       dropped(dropped),
       frame_stats(std::move(frame_stats)) {}
 
-}  // namespace test
+}  // namespace webrtc_pc_e2e
 }  // namespace webrtc

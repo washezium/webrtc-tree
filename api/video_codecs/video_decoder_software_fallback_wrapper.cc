@@ -11,6 +11,7 @@
 #include "api/video_codecs/video_decoder_software_fallback_wrapper.h"
 
 #include <stdint.h>
+
 #include <string>
 #include <utility>
 
@@ -40,7 +41,6 @@ class VideoDecoderSoftwareFallbackWrapper final : public VideoDecoder {
 
   int32_t Decode(const EncodedImage& input_image,
                  bool missing_frames,
-                 const CodecSpecificInfo* codec_specific_info,
                  int64_t render_time_ms) override;
 
   int32_t RegisterDecodeCompleteCallback(
@@ -147,7 +147,6 @@ bool VideoDecoderSoftwareFallbackWrapper::InitFallbackDecoder() {
 int32_t VideoDecoderSoftwareFallbackWrapper::Decode(
     const EncodedImage& input_image,
     bool missing_frames,
-    const CodecSpecificInfo* codec_specific_info,
     int64_t render_time_ms) {
   TRACE_EVENT0("webrtc", "VideoDecoderSoftwareFallbackWrapper::Decode");
   switch (decoder_type_) {
@@ -155,8 +154,7 @@ int32_t VideoDecoderSoftwareFallbackWrapper::Decode(
       return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
     case DecoderType::kHardware: {
       int32_t ret = WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE;
-      ret = hw_decoder_->Decode(input_image, missing_frames,
-                                codec_specific_info, render_time_ms);
+      ret = hw_decoder_->Decode(input_image, missing_frames, render_time_ms);
       if (ret != WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE) {
         return ret;
       }
@@ -172,7 +170,7 @@ int32_t VideoDecoderSoftwareFallbackWrapper::Decode(
     }
     case DecoderType::kFallback:
       return fallback_decoder_->Decode(input_image, missing_frames,
-                                       codec_specific_info, render_time_ms);
+                                       render_time_ms);
     default:
       RTC_NOTREACHED();
       return WEBRTC_VIDEO_CODEC_ERROR;

@@ -13,13 +13,13 @@
 
 #include <atomic>
 #include <deque>
-#include <list>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "api/test/video_quality_analyzer_interface.h"
 #include "api/units/timestamp.h"
 #include "api/video/encoded_image.h"
 #include "api/video/video_frame.h"
@@ -28,10 +28,9 @@
 #include "rtc_base/numerics/samples_stats_counter.h"
 #include "rtc_base/platform_thread.h"
 #include "system_wrappers/include/clock.h"
-#include "test/pc/e2e/api/video_quality_analyzer_interface.h"
 
 namespace webrtc {
-namespace test {
+namespace webrtc_pc_e2e {
 
 class RateCounter {
  public:
@@ -69,7 +68,6 @@ struct FrameCounters {
 };
 
 struct StreamStats {
- public:
   SamplesStatsCounter psnr;
   SamplesStatsCounter ssim;
   // Time from frame encoded (time point on exit from encoder) to the
@@ -94,14 +92,13 @@ struct StreamStats {
   SamplesStatsCounter freeze_time_ms;
   // Mean time between one freeze end and next freeze start.
   SamplesStatsCounter time_between_freezes_ms;
-  SamplesStatsCounter resolution_of_encoded_image;
+  SamplesStatsCounter resolution_of_rendered_frame;
 
   int64_t dropped_by_encoder = 0;
   int64_t dropped_before_encoder = 0;
 };
 
 struct AnalyzerStats {
- public:
   // Size of analyzer internal comparisons queue, measured when new element
   // id added to the queue.
   SamplesStatsCounter comparisons_queue_size;
@@ -113,6 +110,14 @@ struct AnalyzerStats {
   // comparison doesn't include metrics, that require heavy computations like
   // SSIM and PSNR.
   int64_t overloaded_comparisons_done = 0;
+};
+
+struct VideoBweStats {
+  SamplesStatsCounter available_send_bandwidth;
+  SamplesStatsCounter transmission_bitrate;
+  SamplesStatsCounter retransmission_bitrate;
+  SamplesStatsCounter actual_encode_bitrate;
+  SamplesStatsCounter target_encode_bitrate;
 };
 
 class DefaultVideoQualityAnalyzer : public VideoQualityAnalyzerInterface {
@@ -149,8 +154,12 @@ class DefaultVideoQualityAnalyzer : public VideoQualityAnalyzerInterface {
   std::map<std::string, StreamStats> GetStats() const;
   AnalyzerStats GetAnalyzerStats() const;
 
-  // TODO(bugs.webrtc.org/10138): Provide a real implementation for
-  // OnStatsReport.
+  // Will be called everytime new stats reports are available for the
+  // Peer Connection identified by |pc_label|.
+  void OnStatsReports(const std::string& pc_label,
+                      const StatsReports& stats_reports) override;
+
+  std::map<std::string, VideoBweStats> GetVideoBweStats() const;
 
  private:
   struct FrameStats {
@@ -210,9 +219,7 @@ class DefaultVideoQualityAnalyzer : public VideoQualityAnalyzerInterface {
     // If we received frame with id frame_id3, then we will pop frame_id1 and
     // frame_id2 and consider that frames as dropped and then compare received
     // frame with the one from |captured_frames_in_flight_| with id frame_id3.
-    // Also we will put it into the |last_rendered_frame|.
-    std::list<uint16_t> frame_ids;
-    absl::optional<VideoFrame> last_rendered_frame = absl::nullopt;
+    std::deque<uint16_t> frame_ids;
     absl::optional<Timestamp> last_rendered_frame_time = absl::nullopt;
   };
 
@@ -234,10 +241,12 @@ class DefaultVideoQualityAnalyzer : public VideoQualityAnalyzerInterface {
   void ProcessComparisons();
   void ProcessComparison(const FrameComparison& comparison);
   // Report results for all metrics for all streams.
-  void ReportResults() const;
-  static void ReportResults(std::string test_case_name,
-                            StreamStats stats,
-                            FrameCounters frame_counters);
+  void ReportResults();
+  static void ReportVideoBweResults(const std::string& test_case_name,
+                                    const VideoBweStats& video_bwe_stats);
+  static void ReportResults(const std::string& test_case_name,
+                            const StreamStats& stats,
+                            const FrameCounters& frame_counters);
   // Report result for single metric for specified stream.
   static void ReportResult(const std::string& metric_name,
                            const std::string& test_case_name,
@@ -254,6 +263,7 @@ class DefaultVideoQualityAnalyzer : public VideoQualityAnalyzerInterface {
 
   rtc::CriticalSection lock_;
   State state_ RTC_GUARDED_BY(lock_) = State::kNew;
+  Timestamp start_time_ RTC_GUARDED_BY(lock_) = Timestamp::MinusInfinity();
   // Frames that were captured by all streams and still aren't rendered by any
   // stream or deemed dropped.
   std::map<uint16_t, VideoFrame> captured_frames_in_flight_
@@ -274,11 +284,17 @@ class DefaultVideoQualityAnalyzer : public VideoQualityAnalyzerInterface {
   std::deque<FrameComparison> comparisons_ RTC_GUARDED_BY(comparison_lock_);
   AnalyzerStats analyzer_stats_ RTC_GUARDED_BY(comparison_lock_);
 
+  rtc::CriticalSection video_bwe_stats_lock_;
+  // Map between a peer connection label (provided by the framework) and
+  // its video BWE stats.
+  std::map<std::string, VideoBweStats> video_bwe_stats_
+      RTC_GUARDED_BY(video_bwe_stats_lock_);
+
   std::vector<std::unique_ptr<rtc::PlatformThread>> thread_pool_;
   rtc::Event comparison_available_event_;
 };
 
-}  // namespace test
+}  // namespace webrtc_pc_e2e
 }  // namespace webrtc
 
 #endif  // TEST_PC_E2E_ANALYZER_VIDEO_DEFAULT_VIDEO_QUALITY_ANALYZER_H_

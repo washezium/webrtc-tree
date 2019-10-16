@@ -40,9 +40,13 @@ class RateControlSettings final {
   absl::optional<double> GetPacingFactor() const;
   bool UseAlrProbing() const;
 
+  absl::optional<int> LibvpxVp8QpMax() const;
+  absl::optional<int> LibvpxVp8MinPixels() const;
   bool LibvpxVp8TrustedRateController() const;
   bool Vp8BoostBaseLayerQuality() const;
+  bool Vp8DynamicRateSettings() const;
   bool LibvpxVp9TrustedRateController() const;
+  bool Vp9DynamicRateSettings() const;
 
   // TODO(bugs.webrtc.org/10272): Remove one of these when we have merged
   // VideoCodecMode and VideoEncoderConfig::ContentType.
@@ -52,6 +56,7 @@ class RateControlSettings final {
 
   bool TriggerProbeOnMaxAllocatedBitrateChange() const;
   bool UseEncoderBitrateAdjuster() const;
+  bool BitrateAdjusterCanUseNetworkHeadroom() const;
 
  private:
   explicit RateControlSettings(
@@ -64,13 +69,18 @@ class RateControlSettings final {
   FieldTrialOptional<int> congestion_window_pushback_;
   FieldTrialOptional<double> pacing_factor_;
   FieldTrialParameter<bool> alr_probing_;
+  FieldTrialOptional<int> vp8_qp_max_;
+  FieldTrialOptional<int> vp8_min_pixels_;
   FieldTrialParameter<bool> trust_vp8_;
   FieldTrialParameter<bool> trust_vp9_;
   FieldTrialParameter<double> video_hysteresis_;
   FieldTrialParameter<double> screenshare_hysteresis_;
   FieldTrialParameter<bool> probe_max_allocation_;
   FieldTrialParameter<bool> bitrate_adjuster_;
+  FieldTrialParameter<bool> adjuster_use_headroom_;
   FieldTrialParameter<bool> vp8_s0_boost_;
+  FieldTrialParameter<bool> vp8_dynamic_rate_;
+  FieldTrialParameter<bool> vp9_dynamic_rate_;
 };
 
 }  // namespace webrtc

@@ -39,8 +39,8 @@ constexpr int kMaxIat = 64;
 constexpr int kForgetFactor = 32745;
 }  // namespace
 
-using ::testing::Return;
 using ::testing::_;
+using ::testing::Return;
 
 class DelayManagerTest : public ::testing::Test {
  protected:
@@ -107,6 +107,7 @@ void DelayManagerTest::IncreaseTime(int inc_ms) {
     tick_timer_.Increment();
   }
 }
+
 void DelayManagerTest::TearDown() {
   EXPECT_CALL(detector_, Die());
 }
@@ -642,7 +643,10 @@ TEST_F(DelayManagerTest, DelayHistogramFieldTrial) {
     EXPECT_EQ(DelayManager::HistogramMode::RELATIVE_ARRIVAL_DELAY,
               dm_->histogram_mode());
     EXPECT_EQ(1030792151, dm_->histogram_quantile());  // 0.96 in Q30.
-    EXPECT_EQ(32702, dm_->histogram_forget_factor());  // 0.998 in Q15.
+    EXPECT_EQ(
+        32702,
+        dm_->histogram()->base_forget_factor_for_testing());  // 0.998 in Q15.
+    EXPECT_FALSE(dm_->histogram()->start_forget_weight_for_testing());
   }
   {
     test::ScopedFieldTrials field_trial(
@@ -651,7 +655,10 @@ TEST_F(DelayManagerTest, DelayHistogramFieldTrial) {
     EXPECT_EQ(DelayManager::HistogramMode::RELATIVE_ARRIVAL_DELAY,
               dm_->histogram_mode());
     EXPECT_EQ(1046898278, dm_->histogram_quantile());  // 0.975 in Q30.
-    EXPECT_EQ(32702, dm_->histogram_forget_factor());  // 0.998 in Q15.
+    EXPECT_EQ(
+        32702,
+        dm_->histogram()->base_forget_factor_for_testing());  // 0.998 in Q15.
+    EXPECT_FALSE(dm_->histogram()->start_forget_weight_for_testing());
   }
   {
     // NetEqDelayHistogram should take precedence over
@@ -663,7 +670,10 @@ TEST_F(DelayManagerTest, DelayHistogramFieldTrial) {
     EXPECT_EQ(DelayManager::HistogramMode::RELATIVE_ARRIVAL_DELAY,
               dm_->histogram_mode());
     EXPECT_EQ(1030792151, dm_->histogram_quantile());  // 0.96 in Q30.
-    EXPECT_EQ(32702, dm_->histogram_forget_factor());  // 0.998 in Q15.
+    EXPECT_EQ(
+        32702,
+        dm_->histogram()->base_forget_factor_for_testing());  // 0.998 in Q15.
+    EXPECT_FALSE(dm_->histogram()->start_forget_weight_for_testing());
   }
   {
     // Invalid parameters.
@@ -673,8 +683,11 @@ TEST_F(DelayManagerTest, DelayHistogramFieldTrial) {
     EXPECT_EQ(DelayManager::HistogramMode::RELATIVE_ARRIVAL_DELAY,
               dm_->histogram_mode());
     EXPECT_EQ(kDefaultHistogramQuantile,
-              dm_->histogram_quantile());                      // 0.95 in Q30.
-    EXPECT_EQ(kForgetFactor, dm_->histogram_forget_factor());  // 0.9993 in Q15.
+              dm_->histogram_quantile());  // 0.95 in Q30.
+    EXPECT_EQ(
+        kForgetFactor,
+        dm_->histogram()->base_forget_factor_for_testing());  // 0.9993 in Q15.
+    EXPECT_FALSE(dm_->histogram()->start_forget_weight_for_testing());
   }
   {
     test::ScopedFieldTrials field_trial(
@@ -683,8 +696,31 @@ TEST_F(DelayManagerTest, DelayHistogramFieldTrial) {
     EXPECT_EQ(DelayManager::HistogramMode::INTER_ARRIVAL_TIME,
               dm_->histogram_mode());
     EXPECT_EQ(kDefaultHistogramQuantile,
-              dm_->histogram_quantile());                      // 0.95 in Q30.
-    EXPECT_EQ(kForgetFactor, dm_->histogram_forget_factor());  // 0.9993 in Q15.
+              dm_->histogram_quantile());  // 0.95 in Q30.
+    EXPECT_EQ(
+        kForgetFactor,
+        dm_->histogram()->base_forget_factor_for_testing());  // 0.9993 in Q15.
+    EXPECT_FALSE(dm_->histogram()->start_forget_weight_for_testing());
+  }
+
+  // Test parameter for new call start adaptation.
+  {
+    test::ScopedFieldTrials field_trial(
+        "WebRTC-Audio-NetEqDelayHistogram/Enabled-96-0.998-1/");
+    RecreateDelayManager();
+    EXPECT_EQ(dm_->histogram()->start_forget_weight_for_testing().value(), 1.0);
+  }
+  {
+    test::ScopedFieldTrials field_trial(
+        "WebRTC-Audio-NetEqDelayHistogram/Enabled-96-0.998-1.5/");
+    RecreateDelayManager();
+    EXPECT_EQ(dm_->histogram()->start_forget_weight_for_testing().value(), 1.5);
+  }
+  {
+    test::ScopedFieldTrials field_trial(
+        "WebRTC-Audio-NetEqDelayHistogram/Enabled-96-0.998-0.5/");
+    RecreateDelayManager();
+    EXPECT_FALSE(dm_->histogram()->start_forget_weight_for_testing());
   }
 }
 
@@ -723,6 +759,118 @@ TEST_F(DelayManagerTest, RelativeArrivalDelayStatistic) {
   IncreaseTime(2 * kFrameSizeMs);
   EXPECT_CALL(stats_, RelativePacketArrivalDelay(20));
   InsertNextPacket();
+}
+
+TEST_F(DelayManagerTest, DecelerationTargetLevelOffsetFieldTrial) {
+  {
+    test::ScopedFieldTrials field_trial(
+        "WebRTC-Audio-NetEqDecelerationTargetLevelOffset/Enabled-105/");
+    RecreateDelayManager();
+    EXPECT_EQ(dm_->deceleration_target_level_offset_ms().value(), 105 << 8);
+  }
+  {
+    // Negative number.
+    test::ScopedFieldTrials field_trial(
+        "WebRTC-Audio-NetEqDecelerationTargetLevelOffset/Enabled--105/");
+    RecreateDelayManager();
+    EXPECT_FALSE(dm_->deceleration_target_level_offset_ms().has_value());
+  }
+  {
+    // Disabled.
+    test::ScopedFieldTrials field_trial(
+        "WebRTC-Audio-NetEqDecelerationTargetLevelOffset/Disabled/");
+    RecreateDelayManager();
+    EXPECT_FALSE(dm_->deceleration_target_level_offset_ms().has_value());
+  }
+  {
+    // Float number.
+    test::ScopedFieldTrials field_trial(
+        "WebRTC-Audio-NetEqDecelerationTargetLevelOffset/Enabled-105.5/");
+    RecreateDelayManager();
+    EXPECT_EQ(dm_->deceleration_target_level_offset_ms().value(), 105 << 8);
+  }
+  {
+    // Several numbers.
+    test::ScopedFieldTrials field_trial(
+        "WebRTC-Audio-NetEqDecelerationTargetLevelOffset/Enabled-20-40/");
+    RecreateDelayManager();
+    EXPECT_EQ(dm_->deceleration_target_level_offset_ms().value(), 20 << 8);
+  }
+}
+
+TEST_F(DelayManagerTest, DecelerationTargetLevelOffset) {
+  // Border value where 1/4 target buffer level meets
+  // WebRTC-Audio-NetEqDecelerationTargetLevelOffset.
+  constexpr int kBoarderTargetLevel = 100 * 4;
+  {
+    // Test that for a low target level, default behaviour is intact.
+    test::ScopedFieldTrials field_trial(
+        "WebRTC-Audio-NetEqDecelerationTargetLevelOffset/Enabled-100/");
+    const int target_level_ms = ((kBoarderTargetLevel - 1) << 8) / kFrameSizeMs;
+    RecreateDelayManager();
+    SetPacketAudioLength(kFrameSizeMs);
+
+    int lower, higher;  // In Q8.
+    dm_->BufferLimits(target_level_ms, &lower, &higher);
+
+    // Default behaviour of taking 75% of target level.
+    EXPECT_EQ(target_level_ms * 3 / 4, lower);
+    EXPECT_EQ(target_level_ms, higher);
+  }
+
+  {
+    // Test that for the high target level, |lower| is below target level by
+    // fixed constant (100 ms in this Field Trial setup).
+    test::ScopedFieldTrials field_trial(
+        "WebRTC-Audio-NetEqDecelerationTargetLevelOffset/Enabled-100/");
+    const int target_level_ms = ((kBoarderTargetLevel + 1) << 8) / kFrameSizeMs;
+    RecreateDelayManager();
+    SetPacketAudioLength(kFrameSizeMs);
+
+    int lower, higher;  // In Q8.
+    dm_->BufferLimits(target_level_ms, &lower, &higher);
+
+    EXPECT_EQ(target_level_ms - ((100 << 8) / kFrameSizeMs), lower);
+    EXPECT_EQ(target_level_ms, higher);
+  }
+
+  {
+    // Test that for the high target level, without Field Trial the behaviour
+    // will remain the same.
+    const int target_level_ms = ((kBoarderTargetLevel + 1) << 8) / kFrameSizeMs;
+    RecreateDelayManager();
+    SetPacketAudioLength(kFrameSizeMs);
+
+    int lower, higher;  // In Q8.
+    dm_->BufferLimits(target_level_ms, &lower, &higher);
+
+    // Default behaviour of taking 75% of target level.
+    EXPECT_EQ(target_level_ms * 3 / 4, lower);
+    EXPECT_EQ(target_level_ms, higher);
+  }
+}
+
+TEST_F(DelayManagerTest, ExtraDelay) {
+  {
+    // Default behavior. Insert two packets so that a new target level is
+    // calculated.
+    SetPacketAudioLength(kFrameSizeMs);
+    InsertNextPacket();
+    IncreaseTime(kFrameSizeMs);
+    InsertNextPacket();
+    EXPECT_EQ(dm_->TargetLevel(), 1 << 8);
+  }
+  {
+    // Add 80 ms extra delay and calculate a new target level.
+    test::ScopedFieldTrials field_trial(
+        "WebRTC-Audio-NetEqExtraDelay/Enabled-80/");
+    RecreateDelayManager();
+    SetPacketAudioLength(kFrameSizeMs);
+    InsertNextPacket();
+    IncreaseTime(kFrameSizeMs);
+    InsertNextPacket();
+    EXPECT_EQ(dm_->TargetLevel(), 5 << 8);
+  }
 }
 
 }  // namespace webrtc

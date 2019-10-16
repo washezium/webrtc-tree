@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <utility>
 
+#include "api/datagram_transport_interface.h"
+
 namespace webrtc {
 
 MediaTransportSettings::MediaTransportSettings() = default;
@@ -28,7 +30,6 @@ MediaTransportSettings::MediaTransportSettings(const MediaTransportSettings&) =
 MediaTransportSettings& MediaTransportSettings::operator=(
     const MediaTransportSettings&) = default;
 MediaTransportSettings::~MediaTransportSettings() = default;
-
 
 SendDataParams::SendDataParams() = default;
 SendDataParams::SendDataParams(const SendDataParams&) = default;
@@ -46,6 +47,13 @@ MediaTransportFactory::CreateMediaTransport(
     rtc::Thread* network_thread,
     const MediaTransportSettings& settings) {
   return std::unique_ptr<MediaTransportInterface>(nullptr);
+}
+
+RTCErrorOr<std::unique_ptr<DatagramTransportInterface>>
+MediaTransportFactory::CreateDatagramTransport(
+    rtc::Thread* network_thread,
+    const MediaTransportSettings& settings) {
+  return std::unique_ptr<DatagramTransportInterface>(nullptr);
 }
 
 std::string MediaTransportFactory::GetTransportName() const {

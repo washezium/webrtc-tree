@@ -11,7 +11,9 @@
 #include "modules/audio_processing/aec3/render_signal_analyzer.h"
 
 #include <math.h>
+
 #include <array>
+#include <cmath>
 #include <vector>
 
 #include "api/array_view.h"
@@ -35,8 +37,8 @@ void ProduceSinusoid(int sample_rate_hz,
   // Produce a sinusoid of the specified frequency.
   for (size_t k = *sample_counter, j = 0; k < (*sample_counter + kBlockSize);
        ++k, ++j) {
-    x[j] =
-        32767.f * sin(2.f * kPi * sinusoidal_frequency_hz * k / sample_rate_hz);
+    x[j] = 32767.f *
+           std::sin(2.f * kPi * sinusoidal_frequency_hz * k / sample_rate_hz);
   }
   *sample_counter = *sample_counter + kBlockSize;
 }

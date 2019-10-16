@@ -75,7 +75,6 @@ LEGACY_API_DIRS = (
   'common_audio/include',
   'modules/audio_coding/include',
   'modules/audio_processing/include',
-  'modules/bitrate_controller/include',
   'modules/congestion_controller/include',
   'modules/include',
   'modules/remote_bitrate_estimator/include',
@@ -176,11 +175,11 @@ def CheckNativeApiHeaderChanges(input_api, output_api):
       if path == 'api':
         # Special case: Subdirectories included.
         if dn == 'api' or dn.startswith('api/'):
-          files.append(f)
+          files.append(f.LocalPath())
       else:
         # Normal case: Subdirectories not included.
         if dn == path:
-          files.append(f)
+          files.append(f.LocalPath())
 
   if files:
     return [output_api.PresubmitNotifyResult(API_CHANGE_MSG, files)]
@@ -498,9 +497,16 @@ def CheckNoStreamUsageIsAdded(input_api, output_api,
       r'// no-presubmit-check TODO\(webrtc:8982\)')
   file_filter = lambda x: (input_api.FilterSourceFile(x)
                            and source_file_filter(x))
+
+  def _IsException(file_path):
+    is_test = any(file_path.endswith(x) for x in ['_test.cc', '_tests.cc',
+                                                  '_unittest.cc',
+                                                  '_unittests.cc'])
+    return file_path.startswith('examples') or is_test
+
   for f in input_api.AffectedSourceFiles(file_filter):
-    # Usage of stringstream is allowed under examples/.
-    if f.LocalPath() == 'PRESUBMIT.py' or f.LocalPath().startswith('examples'):
+    # Usage of stringstream is allowed under examples/ and in tests.
+    if f.LocalPath() == 'PRESUBMIT.py' or _IsException(f.LocalPath()):
       continue
     for line_num, line in f.ChangedContents():
       if ((include_re.search(line) or usage_re.search(line))
